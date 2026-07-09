@@ -5,14 +5,19 @@
   color-scheme: dark;
 
   --sky: oklch(0.19 0.016 258);
-  --panel: oklch(0.225 0.014 256);
-  --panel-raised: oklch(0.26 0.014 254);
-  --hairline: oklch(0.325 0.014 254);
-  --hairline-strong: oklch(0.4 0.016 252);
+  --panel: oklch(0.245 0.014 256);
+  --panel-raised: oklch(0.285 0.014 254);
+  --hairline: oklch(0.37 0.014 254);
+  --hairline-strong: oklch(0.46 0.016 252);
 
   --ink: oklch(0.91 0.014 88);
-  --muted: oklch(0.66 0.02 252);
-  --faint: oklch(0.5 0.018 252);
+  --muted: oklch(0.72 0.02 252);
+  --faint: oklch(0.63 0.02 252);
+
+  /* type scale: two UI sizes (1.2 step), display sizes for the stage */
+  --text-xs: 0.75rem;
+  --text-sm: 0.9rem;
+  --text-lg: 1.35rem;
 
   /* the light scale */
   --moss: oklch(0.78 0.11 131);
@@ -30,6 +35,7 @@
   background: var(--sky);
   font-family: var(--font-body);
   font-size: 15px;
+  line-height: 1.5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -167,7 +173,7 @@ dd {
   border: 0;
   background: none;
   color: var(--ink);
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
 }
 
 .rail-filter input::placeholder {
@@ -190,7 +196,7 @@ dd {
   border: 1px solid var(--hairline-strong);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   font-weight: 560;
   letter-spacing: 0.04em;
 }
@@ -259,7 +265,7 @@ dd {
 }
 
 .session-row:hover {
-  background: oklch(0.26 0.014 254 / 0.6);
+  background: oklch(0.285 0.014 254 / 0.6);
 }
 
 .session-row.active {
@@ -272,7 +278,7 @@ dd {
 }
 
 .session-title {
-  font-size: 0.86rem;
+  font-size: var(--text-sm);
   font-weight: 560;
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -293,7 +299,7 @@ dd {
   flex-wrap: wrap;
   gap: 4px 7px;
   color: var(--faint);
-  font-size: 0.72rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
 }
@@ -308,7 +314,7 @@ dd {
   border: 1px solid var(--hairline-strong);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 0.6rem;
+  font-size: var(--text-xs);
   font-weight: 560;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -328,7 +334,7 @@ dd {
   padding: 10px 18px 14px;
   border-top: 1px solid var(--hairline);
   color: var(--faint);
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-variant-numeric: tabular-nums;
@@ -365,7 +371,7 @@ dd {
   gap: 8px;
   margin-top: 5px;
   color: var(--muted);
-  font-size: 0.76rem;
+  font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -378,27 +384,33 @@ dd {
   flex-wrap: wrap;
   gap: 3px 18px;
   margin-top: 18px;
-  font-size: 0.72rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.03em;
   font-variant-numeric: tabular-nums;
+  /* the HUD swallows pointer events; stats opt back in for their tooltips */
+  pointer-events: auto;
 }
 
 .hud-stats .stat {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  cursor: help;
 }
 
 .hud-stats .stat span {
   color: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: 0.64rem;
+  font-size: var(--text-xs);
+  text-decoration: underline dotted oklch(0.63 0.02 252 / 0.5);
+  text-underline-offset: 3px;
 }
 
 .hud-stats .stat strong {
+  font-size: var(--text-sm);
   font-weight: 560;
-  color: var(--muted);
+  color: var(--ink);
 }
 
 .hud-right {
@@ -417,7 +429,7 @@ dd {
 
 .view-toggle button {
   padding: 5px 13px;
-  font-size: 0.72rem;
+  font-size: var(--text-xs);
   font-weight: 560;
   letter-spacing: 0.05em;
   color: var(--muted);
@@ -441,7 +453,7 @@ dd {
   display: grid;
   gap: 7px;
   padding: 12px 14px;
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.05em;
   color: var(--muted);
   text-align: left;
@@ -475,7 +487,7 @@ dd {
 }
 
 .legend-dot.unvisited {
-  background: oklch(0.35 0.014 254);
+  background: oklch(0.5 0.014 254);
 }
 
 .legend-note {
@@ -483,7 +495,7 @@ dd {
   padding-top: 7px;
   border-top: 1px solid var(--hairline);
   color: var(--faint);
-  font-size: 0.64rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
 }
 
@@ -498,7 +510,7 @@ dd {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  background: oklch(0.225 0.014 256 / 0.96);
+  background: oklch(0.245 0.014 256 / 0.96);
   border: 1px solid var(--hairline);
   border-radius: 6px;
   scrollbar-width: thin;
@@ -532,7 +544,7 @@ dd {
 }
 
 .inspector-path {
-  font-size: 0.88rem;
+  font-size: var(--text-sm);
   font-weight: 560;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -550,7 +562,7 @@ dd {
   border: 1px solid var(--hairline-strong);
   border-radius: 999px;
   color: var(--muted);
-  font-size: 0.66rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -581,13 +593,13 @@ dd {
 
 .inspector-facts dt {
   color: var(--faint);
-  font-size: 0.64rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 .inspector-facts dd {
-  font-size: 0.8rem;
+  font-size: var(--text-sm);
   font-weight: 560;
   font-variant-numeric: tabular-nums;
 }
@@ -611,7 +623,7 @@ dd {
 .eyebrow {
   margin: 0 0 10px;
   color: var(--faint);
-  font-size: 0.64rem;
+  font-size: var(--text-xs);
   font-weight: 560;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -630,7 +642,7 @@ dd {
   padding: 6px 4px;
   border-radius: 3px;
   text-align: left;
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -655,7 +667,7 @@ dd {
 
 .muted {
   color: var(--faint);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -731,7 +743,7 @@ dd {
   border: 1px solid var(--hairline-strong);
   border-radius: 4px;
   color: var(--ink);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   font-weight: 560;
   letter-spacing: 0.04em;
 }
@@ -851,7 +863,7 @@ dd {
 
 .readout-count {
   color: var(--faint);
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.06em;
 }
 
@@ -859,7 +871,7 @@ dd {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 0.82rem;
+  font-size: var(--text-sm);
   font-weight: 560;
   white-space: nowrap;
   overflow: hidden;
@@ -868,7 +880,7 @@ dd {
 
 .readout-tool .err {
   color: var(--alarm);
-  font-size: 0.68rem;
+  font-size: var(--text-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -876,7 +888,7 @@ dd {
 .readout-summary {
   grid-column: 1 / -1;
   color: var(--muted);
-  font-size: 0.74rem;
+  font-size: var(--text-sm);
   line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
@@ -895,7 +907,7 @@ dd {
   border-radius: 4px;
   background: var(--panel-raised);
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
   pointer-events: none;
 }
 
@@ -919,14 +931,14 @@ dd {
   color: var(--muted);
   max-width: 340px;
   line-height: 1.6;
-  font-size: 0.86rem;
+  font-size: var(--text-sm);
 }
 
 .empty-stage .card h2 {
   font-family: var(--font-display);
   font-style: italic;
   font-weight: 480;
-  font-size: 1.3rem;
+  font-size: var(--text-lg);
   margin-bottom: 8px;
   color: var(--ink);
 }

@@ -52,7 +52,7 @@ export function labelTexture(text: string): { texture: THREE.Texture; aspect: nu
   ctx.font = font;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
-  ctx.fillStyle = "rgba(154, 163, 181, 0.92)";
+  ctx.fillStyle = "rgba(197, 205, 222, 0.95)";
   ctx.fillText(text, width / 2, height / 2 + 1);
   const texture = new THREE.CanvasTexture(canvas);
   texture.anisotropy = 4;

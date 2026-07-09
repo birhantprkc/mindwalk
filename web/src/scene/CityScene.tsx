@@ -18,8 +18,8 @@ interface CitySceneProps {
 // earned by attention — touch depth × revisits — so mountains grow where the
 // walker lingered. Light is data: only touched terrain gets bright color.
 const colors: Record<Touch | "unvisited" | "ghost" | "selected", THREE.Color> = {
-  unvisited: new THREE.Color("#363d4b"),
-  ghost: new THREE.Color("#272c37"),
+  unvisited: new THREE.Color("#5b6372"),
+  ghost: new THREE.Color("#404551"),
   ...touchColors
 };
 
@@ -267,7 +267,7 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
           new THREE.Vector3(dir.rect.w, height, dir.rect.d)
         );
         plates.setMatrixAt(i, matrix);
-        shade.set("#161a23").lerp(new THREE.Color("#1e232e"), Math.min(dir.depth, 3) / 3);
+        shade.set("#1a1f29").lerp(new THREE.Color("#252b37"), Math.min(dir.depth, 3) / 3);
         plates.setColorAt(i, shade);
       });
       plates.instanceMatrix.needsUpdate = true;
@@ -296,8 +296,8 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
 
     // attention terrain: unlit columns that grow out of the plain
     const terrain = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshBasicMaterial({ toneMapped: false }),
+      attentionColumnGeometry(),
+      new THREE.MeshBasicMaterial({ toneMapped: false, vertexColors: true }),
       city.files.length
     );
     terrain.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(city.files.length * 3), 3);
@@ -425,6 +425,23 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
   }, [city, playback, bounds]);
 
   return <div className="city-scene" ref={hostRef} aria-label="Attention terrain" />;
+}
+
+// Columns must read as phosphorescence, not paint: glow pools at the crest and
+// falls off into the plain. Vertex shade multiplies the per-instance touch
+// color; the top face sits under the side rims so edges catch the most light.
+function attentionColumnGeometry(): THREE.BoxGeometry {
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  const pos = geo.getAttribute("position");
+  const normal = geo.getAttribute("normal");
+  const shade = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const t = pos.getY(i) + 0.5;
+    const glow = normal.getY(i) === 1 ? 0.82 : 0.34 + 0.66 * t * t;
+    shade.fill(glow, i * 3, i * 3 + 3);
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(shade, 3));
+  return geo;
 }
 
 function baseColor(file: CityFile): THREE.Color {

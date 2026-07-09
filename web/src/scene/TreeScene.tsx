@@ -19,11 +19,11 @@ interface TreeSceneProps {
 // leaves. The walker is a firefly that lights leaves as it lands; attention
 // depth shows as the pool of light it leaves behind on the ground.
 const colors: Record<Touch | "unvisited" | "ghost" | "selected", THREE.Color> = {
-  unvisited: new THREE.Color("#434b5c"),
-  ghost: new THREE.Color("#2c313d"),
+  unvisited: new THREE.Color("#5a6375"),
+  ghost: new THREE.Color("#404552"),
   ...touchColors
 };
-const EDGE_BASE = new THREE.Color("#242a36");
+const EDGE_BASE = new THREE.Color("#3c424f");
 const LEAF_Y = 0.7;
 
 function haloRadius(touch: Touch, visits: number): number {
@@ -314,7 +314,7 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
         new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false })
       );
       const h = dir.depth === 1 ? 2.6 : 1.9;
-      sprite.scale.set(h * aspect * 0.45, h * 0.45, 1);
+      sprite.scale.set(h * aspect * 0.58, h * 0.58, 1);
       sprite.position.set(dir.x, 1.8, dir.z);
       sprite.raycast = () => undefined;
       group.add(sprite);

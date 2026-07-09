@@ -26,12 +26,20 @@ export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudPro
         ) : null}
         {stats ? (
           <div className="hud-stats">
-            <Stat label="files" value={stats.filesInRepo} />
-            <Stat label="fovea" value={stats.fovea} />
-            <Stat label="parafovea" value={stats.parafovea} />
-            <Stat label="edited" value={stats.edited} />
-            <Stat label="regression" value={`${Math.round(stats.regressionRate * 100)}%`} />
-            <Stat label="errors" value={`${Math.round(stats.errorRate * 100)}%`} />
+            <Stat label="files" value={stats.filesInRepo} hint="Files in the repository map" />
+            <Stat label="fovea" value={stats.fovea} hint="Files the agent opened — read or edited" />
+            <Stat label="parafovea" value={stats.parafovea} hint="Files only seen in search results, never opened" />
+            <Stat label="edited" value={stats.edited} hint="Files the agent changed" />
+            <Stat
+              label="regression"
+              value={`${Math.round(stats.regressionRate * 100)}%`}
+              hint="Reads that re-read a file unchanged since its last read"
+            />
+            <Stat
+              label="errors"
+              value={`${Math.round(stats.errorRate * 100)}%`}
+              hint="Tool calls that returned an error"
+            />
           </div>
         ) : null}
       </div>
@@ -72,9 +80,9 @@ export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudPro
   );
 });
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+function Stat({ label, value, hint }: { label: string; value: string | number; hint: string }) {
   return (
-    <div className="stat">
+    <div className="stat" title={hint}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>

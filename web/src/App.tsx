@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { getCityMap, getTrace, listSessions } from "./api/client";
+import { describeError, getCityMap, getTrace, listSessions } from "./api/client";
 import { PlaybackEngine } from "./playback/reducer";
 import { CityScene } from "./scene/CityScene";
 import { TreeScene } from "./scene/TreeScene";
@@ -65,7 +65,7 @@ export default function App() {
         setActiveSession(next);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeError(err, "scanning sessions"));
     } finally {
       setLoading(false);
     }
@@ -90,7 +90,7 @@ export default function App() {
         setSelectedPath(undefined);
       })
       .catch((err) => {
-        if (!stale) setError(err instanceof Error ? err.message : String(err));
+        if (!stale) setError(describeError(err, "loading the session"));
       })
       .finally(() => {
         if (!stale) setLoading(false);
