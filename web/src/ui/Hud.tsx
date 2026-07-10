@@ -6,13 +6,20 @@ interface HudProps {
   trace?: Trace;
   city?: CityMap;
   view: SceneView;
+  // live counts at the playhead, passed as primitives so memo stays effective
+  editedNow: number;
+  readNow: number;
+  seenNow: number;
   onViewChange: (view: SceneView) => void;
 }
 
-// memo: the app re-renders every playback tick; the HUD only depends on the
-// loaded session and the view toggle
-export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudProps) {
+// memo: the app re-renders every playback tick; the HUD only changes when the
+// session, the view toggle, or the touch counts under the playhead change
+export const Hud = memo(function Hud({ trace, city, view, editedNow, readNow, seenNow, onViewChange }: HudProps) {
   const stats = trace?.stats;
+  const readFinal = stats ? stats.fovea - stats.edited : 0;
+  const unvisitedNow = stats ? Math.max(0, stats.filesInRepo - editedNow - readNow - seenNow) : 0;
+  const unvisitedFinal = stats ? Math.max(0, stats.filesInRepo - stats.fovea - stats.parafovea) : 0;
   return (
     <div className="hud" aria-hidden={!city}>
       <div className="hud-left">
@@ -25,22 +32,49 @@ export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudPro
           </div>
         ) : null}
         {stats ? (
-          <div className="hud-stats">
-            <Stat label="files" value={stats.filesInRepo} hint="Files in the repository map" />
-            <Stat label="fovea" value={stats.fovea} hint="Files the agent opened — read or edited" />
-            <Stat label="parafovea" value={stats.parafovea} hint="Files only seen in search results, never opened" />
-            <Stat label="edited" value={stats.edited} hint="Files the agent changed" />
-            <Stat
-              label="regression"
-              value={`${Math.round(stats.regressionRate * 100)}%`}
-              hint="Reads that re-read a file unchanged since its last read"
-            />
-            <Stat
-              label="errors"
-              value={`${Math.round(stats.errorRate * 100)}%`}
-              hint="Tool calls that returned an error"
-            />
-          </div>
+          <>
+            {/* the spectrum doubles as scene legend and live tally: each entry is
+                a touch state, counted at the playhead → across the whole walk */}
+            <div className="spectrum">
+              <SpectrumStat
+                kind="edit"
+                label="edited"
+                now={editedNow}
+                final={stats.edited}
+                hint="Files the agent changed"
+              />
+              <SpectrumStat
+                kind="read"
+                label="read"
+                now={readNow}
+                final={readFinal}
+                hint="Files the agent opened and read, but never changed"
+              />
+              <SpectrumStat
+                kind="hit"
+                label="seen"
+                now={seenNow}
+                final={stats.parafovea}
+                hint="Files that only appeared in search results, never opened"
+              />
+              <SpectrumStat
+                kind="unvisited"
+                label="unvisited"
+                now={unvisitedNow}
+                final={unvisitedFinal}
+                hint="Files in the map the agent never touched"
+              />
+            </div>
+            <div className="hud-quiet">
+              <span data-hint="Files in the repository map">{stats.filesInRepo} files</span>
+              <span data-hint="Reads that re-read a file unchanged since its last read">
+                re-reads {pct(stats.regressionRate)}
+              </span>
+              <span data-hint="Tool calls that returned an error — press X to jump to the next one">
+                errors {pct(stats.errorRate)}
+              </span>
+            </div>
+          </>
         ) : null}
       </div>
       {city ? (
@@ -53,26 +87,8 @@ export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudPro
               Terrain
             </button>
           </div>
-          <div className="legend">
-          <div className="legend-row">
-            <span className="legend-dot edit" />
-            <span>edited</span>
-          </div>
-          <div className="legend-row">
-            <span className="legend-dot read" />
-            <span>read</span>
-          </div>
-          <div className="legend-row">
-            <span className="legend-dot hit" />
-            <span>search hit</span>
-          </div>
-          <div className="legend-row">
-            <span className="legend-dot unvisited" />
-            <span>unvisited</span>
-          </div>
-          <div className="legend-note">
+          <div className="encode-note">
             {view === "tree" ? "glow ∝ depth × revisits" : "height ∝ depth × revisits"}
-          </div>
           </div>
         </div>
       ) : null}
@@ -80,13 +96,30 @@ export const Hud = memo(function Hud({ trace, city, view, onViewChange }: HudPro
   );
 });
 
-function Stat({ label, value, hint }: { label: string; value: string | number; hint: string }) {
+function SpectrumStat({
+  kind,
+  label,
+  now,
+  final,
+  hint
+}: {
+  kind: "edit" | "read" | "hit" | "unvisited";
+  label: string;
+  now: number;
+  final: number;
+  hint: string;
+}) {
   return (
-    <div className="stat" title={hint}>
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="spectrum-stat" data-hint={hint}>
+      <span className={`legend-dot ${kind}`} />
+      <span className="spectrum-label">{label}</span>
+      <strong>{now === final ? final : `${now} → ${final}`}</strong>
     </div>
   );
+}
+
+function pct(rate: number): string {
+  return `${Math.round(rate * 100)}%`;
 }
 
 function basename(path: string): string {

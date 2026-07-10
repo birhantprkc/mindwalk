@@ -1,6 +1,6 @@
-import { Pause, Play, RotateCcw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { Action, Trace } from "../types";
+import { Pause, Play, RotateCcw, StepBack, StepForward } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Action, Mark, Trace, TraceEvent } from "../types";
 
 interface TimelineProps {
   trace?: Trace;
@@ -9,14 +9,38 @@ interface TimelineProps {
 }
 
 const BUCKETS = 160;
+const BASE_TICK_MS = 340;
+const SPEEDS = [1, 4, 16] as const;
+type Speed = (typeof SPEEDS)[number];
 
 interface Bucket {
   count: number;
   dominant: Action;
 }
 
+// marks that land on the same strip pixel collapse into one glyph; the title
+// carries the count so dense sessions stay legible
+interface MarkGroup {
+  type: Mark["type"];
+  seq: number;
+  pos: number;
+  count: number;
+  note?: string;
+}
+
+const MARK_SLOTS = 220;
+
+const MARK_LABEL: Record<Mark["type"], string> = {
+  compaction: "context compaction",
+  "user-message": "user message",
+  subagent: "subagent"
+};
+
+const STRIP_ACTIONS: Action[] = ["search", "read", "edit", "verify", "exec"];
+
 export function Timeline({ trace, currentSeq, onChange }: TimelineProps) {
   const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState<Speed>(1);
   const total = trace?.events.length ?? 0;
   const max = Math.max(0, total - 1);
   const seq = Math.min(currentSeq, max);
@@ -26,18 +50,119 @@ export function Timeline({ trace, currentSeq, onChange }: TimelineProps) {
     setPlaying(false);
   }, [trace]);
 
-  // the timer reads position via refs so ticking doesn't tear it down
+  // the timer and shortcuts read position via refs so ticking doesn't tear them down
   const seqRef = useRef(seq);
   const maxRef = useRef(max);
+  const playingRef = useRef(playing);
   seqRef.current = seq;
   maxRef.current = max;
+  playingRef.current = playing;
+
   useEffect(() => {
     if (!playing || total === 0) return;
+    // higher speeds keep the render rate bounded by advancing several events per tick
+    const interval = Math.max(85, BASE_TICK_MS / speed);
+    const step = Math.max(1, Math.round((speed * interval) / BASE_TICK_MS));
     const timer = window.setInterval(() => {
-      onChange(seqRef.current >= maxRef.current ? 0 : seqRef.current + 1);
-    }, 340);
+      if (seqRef.current >= maxRef.current) {
+        setPlaying(false);
+        return;
+      }
+      onChange(Math.min(seqRef.current + step, maxRef.current));
+    }, interval);
     return () => window.clearInterval(timer);
-  }, [playing, total, onChange]);
+  }, [playing, speed, total, onChange]);
+
+  const togglePlay = useCallback(() => {
+    if (!playingRef.current && seqRef.current >= maxRef.current) onChange(0);
+    setPlaying((v) => !v);
+  }, [onChange]);
+
+  const cycleSpeed = useCallback(() => {
+    setSpeed((s) => SPEEDS[(SPEEDS.indexOf(s) + 1) % SPEEDS.length]);
+  }, []);
+
+  const step = useCallback(
+    (delta: number) => {
+      onChange(Math.min(maxRef.current, Math.max(0, seqRef.current + delta)));
+    },
+    [onChange]
+  );
+
+  const jumpEvent = useCallback(
+    (dir: 1 | -1, pred: (e: TraceEvent) => boolean) => {
+      if (!trace) return;
+      for (let i = seqRef.current + dir; i >= 0 && i < trace.events.length; i += dir) {
+        if (pred(trace.events[i])) {
+          onChange(i);
+          return;
+        }
+      }
+    },
+    [trace, onChange]
+  );
+
+  const markSeqs = useMemo(() => {
+    const clamped = (trace?.marks ?? []).map((mark) => Math.min(mark.seq, Math.max(0, (trace?.events.length ?? 1) - 1)));
+    return [...new Set(clamped)].sort((a, b) => a - b);
+  }, [trace]);
+
+  const jumpMark = useCallback(
+    (dir: 1 | -1) => {
+      const cur = seqRef.current;
+      const next = dir === 1 ? markSeqs.find((s) => s > cur) : [...markSeqs].reverse().find((s) => s < cur);
+      if (next !== undefined) onChange(next);
+    },
+    [markSeqs, onChange]
+  );
+
+  // playback shortcuts; scene and rail keep their own (⌘B lives in App)
+  useEffect(() => {
+    if (!trace) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, button, [contenteditable]")) return;
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          togglePlay();
+          return;
+        case "ArrowLeft":
+          e.preventDefault();
+          step(e.shiftKey ? -10 : -1);
+          return;
+        case "ArrowRight":
+          e.preventDefault();
+          step(e.shiftKey ? 10 : 1);
+          return;
+        case "Home":
+          e.preventDefault();
+          onChange(0);
+          return;
+        case "End":
+          e.preventDefault();
+          onChange(maxRef.current);
+          return;
+      }
+      switch (e.key.toLowerCase()) {
+        case "s":
+          cycleSpeed();
+          return;
+        case "e":
+          jumpEvent(e.shiftKey ? -1 : 1, (ev) => ev.action === "edit");
+          return;
+        case "x":
+          jumpEvent(e.shiftKey ? -1 : 1, (ev) => ev.isError);
+          return;
+        case "m":
+          jumpMark(e.shiftKey ? -1 : 1);
+          return;
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [trace, togglePlay, step, onChange, cycleSpeed, jumpEvent, jumpMark]);
 
   const buckets = useMemo<Bucket[]>(() => {
     if (!trace || total === 0) return [];
@@ -69,32 +194,85 @@ export function Timeline({ trace, currentSeq, onChange }: TimelineProps) {
 
   const peak = useMemo(() => buckets.reduce((acc, b) => Math.max(acc, b.count), 1), [buckets]);
 
+  const markGroups = useMemo<MarkGroup[]>(() => {
+    if (!trace) return [];
+    const groups = new Map<string, MarkGroup>();
+    for (const mark of trace.marks) {
+      // tail marks can carry seq == events.length; clamp keeps them on the strip
+      const seqC = Math.min(mark.seq, max);
+      const pos = max > 0 ? seqC / max : 0;
+      const key = `${mark.type}:${Math.round(pos * MARK_SLOTS)}`;
+      const group = groups.get(key);
+      if (group) {
+        group.count++;
+        group.seq = Math.min(group.seq, seqC);
+      } else {
+        groups.set(key, { type: mark.type, seq: seqC, pos, count: 1, note: mark.note });
+      }
+    }
+    return [...groups.values()];
+  }, [trace, max]);
+
   return (
     <footer className="deck">
       <div className="transport">
-        <button className="icon-btn" onClick={() => onChange(0)} title="Restart" aria-label="Restart playback">
+        <button
+          className="icon-btn"
+          onClick={() => onChange(0)}
+          disabled={total === 0}
+          title="Restart (Home)"
+          aria-label="Restart playback"
+        >
           <RotateCcw size={15} />
         </button>
         <button
-          className="play-btn"
-          onClick={() => setPlaying((v) => !v)}
+          className="icon-btn"
+          onClick={() => step(-1)}
           disabled={total === 0}
+          title="Step back (←)"
+          aria-label="Step back one event"
+        >
+          <StepBack size={15} />
+        </button>
+        <button
+          className="play-btn"
+          onClick={togglePlay}
+          disabled={total === 0}
+          title={playing ? "Pause (Space)" : "Play (Space)"}
           aria-label={playing ? "Pause playback" : "Play playback"}
         >
-          {playing ? <Pause size={14} /> : <Play size={14} />}
+          {playing ? <Pause size={15} /> : <Play size={15} />}
           <span>{playing ? "Pause" : "Play"}</span>
+        </button>
+        <button
+          className="icon-btn"
+          onClick={() => step(1)}
+          disabled={total === 0}
+          title="Step forward (→)"
+          aria-label="Step forward one event"
+        >
+          <StepForward size={15} />
+        </button>
+        <button
+          className={speed === 1 ? "speed-btn" : "speed-btn engaged"}
+          onClick={cycleSpeed}
+          disabled={total === 0}
+          title="Cycle playback speed (S)"
+          aria-label={`Playback speed ${speed}x`}
+        >
+          {speed}×
         </button>
       </div>
 
       <div className="strip">
         <div className="strip-marks" aria-hidden>
-          {/* tail marks can carry seq == events.length; clamp keeps them on the strip */}
-          {trace?.marks.map((mark, i) => (
+          {markGroups.map((group, i) => (
             <span
-              key={`${mark.seq}-${mark.type}-${i}`}
-              className={`strip-mark ${mark.type}`}
-              style={{ left: `${(Math.min(mark.seq, max) / Math.max(max, 1)) * 100}%` }}
-              title={mark.type === "compaction" ? "context compaction" : mark.note || mark.type}
+              key={`${group.type}-${group.seq}-${i}`}
+              className={`strip-mark ${group.type}`}
+              style={{ left: `${group.pos * 100}%` }}
+              title={`${group.note || MARK_LABEL[group.type]}${group.count > 1 ? ` ×${group.count}` : ""}`}
+              onClick={() => onChange(group.seq)}
             />
           ))}
         </div>
@@ -110,6 +288,14 @@ export function Timeline({ trace, currentSeq, onChange }: TimelineProps) {
         {total > 0 ? (
           <div className="strip-playhead" style={{ left: `${(seq / Math.max(max, 1)) * 100}%` }} aria-hidden />
         ) : null}
+        <div className="strip-legend" aria-hidden>
+          {STRIP_ACTIONS.map((action) => (
+            <span key={action} className="strip-legend-item">
+              <span className={`action-dot ${action}`} />
+              {action}
+            </span>
+          ))}
+        </div>
         <input
           className="strip-input"
           type="range"
@@ -133,13 +319,15 @@ export function Timeline({ trace, currentSeq, onChange }: TimelineProps) {
               <span className={`action-dot ${event.action}`} />
               {event.tool}
               {event.isError ? <span className="err">error</span> : null}
-              {event.ts ? <span style={{ color: "var(--faint)", fontWeight: 420 }}>{clock(event.ts)}</span> : null}
+              {event.ts ? <span className="readout-clock">{clock(event.ts)}</span> : null}
             </>
           ) : (
             "No session"
           )}
         </span>
-        <p className="readout-summary">{event?.summary ?? "Select a session to start the walk."}</p>
+        <p className="readout-summary" title={event?.summary}>
+          {event?.summary ?? "Select a session to start the walk."}
+        </p>
       </div>
     </footer>
   );

@@ -425,7 +425,8 @@ dd {
   color: var(--ember);
 }
 
-.hud-stats {
+/* spectrum: scene legend and live tally in one instrument row */
+.spectrum {
   display: flex;
   flex-wrap: wrap;
   gap: 3px 18px;
@@ -437,26 +438,71 @@ dd {
   pointer-events: auto;
 }
 
-.hud-stats .stat {
+.spectrum-stat {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  cursor: help;
+  align-items: center;
+  gap: 7px;
 }
 
-.hud-stats .stat span {
+.spectrum-label {
   color: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  font-size: var(--text-xs);
   text-decoration: underline dotted oklch(0.63 0.02 252 / 0.5);
   text-underline-offset: 3px;
 }
 
-.hud-stats .stat strong {
+.spectrum-stat strong {
   font-size: var(--text-sm);
   font-weight: 560;
   color: var(--ink);
+}
+
+.hud-quiet {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  margin-top: 7px;
+  color: var(--faint);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+}
+
+/* instant hover definitions — native title is too slow for an instrument */
+[data-hint] {
+  position: relative;
+  cursor: help;
+}
+
+[data-hint]::after {
+  content: attr(data-hint);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: 250px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  font-weight: 420;
+  letter-spacing: 0.01em;
+  line-height: 1.45;
+  text-transform: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease-out;
+}
+
+[data-hint]:hover::after {
+  opacity: 1;
+  visibility: visible;
 }
 
 .hud-right {
@@ -495,22 +541,6 @@ dd {
   background: var(--panel-raised);
 }
 
-.legend {
-  display: grid;
-  gap: 7px;
-  padding: 12px 14px;
-  font-size: var(--text-xs);
-  letter-spacing: 0.05em;
-  color: var(--muted);
-  text-align: left;
-}
-
-.legend-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
 .legend-dot {
   width: 8px;
   height: 8px;
@@ -536,13 +566,11 @@ dd {
   background: oklch(0.5 0.014 254);
 }
 
-.legend-note {
-  margin-top: 4px;
-  padding-top: 7px;
-  border-top: 1px solid var(--hairline);
+.encode-note {
   color: var(--faint);
   font-size: var(--text-xs);
   letter-spacing: 0.06em;
+  text-align: right;
 }
 
 /* ---------- inspector ---------- */
@@ -799,6 +827,34 @@ dd {
   background: var(--panel-raised);
 }
 
+.speed-btn {
+  min-width: 34px;
+  height: 30px;
+  padding: 0 7px;
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 560;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-btn:hover {
+  color: var(--ink);
+  background: var(--panel-raised);
+}
+
+.speed-btn.engaged {
+  color: oklch(0.95 0.02 88);
+  background: var(--panel-raised);
+}
+
+.transport button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
 .strip {
   position: relative;
   height: 46px;
@@ -811,6 +867,8 @@ dd {
   left: 0;
   right: 0;
   height: 10px;
+  /* marks are clickable jump targets, but the row itself must not block the slider */
+  pointer-events: none;
 }
 
 .strip-mark {
@@ -821,11 +879,37 @@ dd {
   transform: translateX(-50%) rotate(45deg);
   border: 1px solid var(--ember);
   background: transparent;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.12s ease-out;
+}
+
+.strip-mark:hover {
+  transform: translateX(-50%) rotate(45deg) scale(1.5);
 }
 
 .strip-mark.subagent {
   border-color: var(--moon);
   border-radius: 50%;
+}
+
+/* user turns are frequent: a quiet slate tick, never a peer of compaction
+   diamonds. transparent side borders widen the click target past 2px. */
+.strip-mark.user-message {
+  top: 2px;
+  width: 8px;
+  height: 6px;
+  border: 0 solid transparent;
+  border-inline-width: 3px;
+  border-radius: 0;
+  background: oklch(0.52 0.02 252);
+  background-clip: content-box;
+  transform: translateX(-50%);
+}
+
+.strip-mark.user-message:hover {
+  transform: translateX(-50%) scale(1.6, 1.35);
+  background-color: var(--muted);
 }
 
 .strip-bars {
@@ -889,6 +973,30 @@ dd {
   background: var(--ink);
 }
 
+/* engraved axis caption: decodes the bar colors without leaving the frame */
+.strip-legend {
+  position: absolute;
+  /* keep clear of the playhead parked at the strip's right end */
+  right: 12px;
+  bottom: 0;
+  display: flex;
+  gap: 11px;
+  color: var(--faint);
+  font-size: 0.68rem;
+  letter-spacing: 0.07em;
+}
+
+.strip-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.strip-legend .action-dot {
+  width: 5px;
+  height: 5px;
+}
+
 .strip-input {
   position: absolute;
   inset: 8px 0 0;
@@ -922,6 +1030,11 @@ dd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.readout-clock {
+  color: var(--faint);
+  font-weight: 420;
 }
 
 .readout-tool .err {
@@ -1026,7 +1139,7 @@ dd {
     font-size: 1.2rem;
   }
 
-  .legend {
+  .encode-note {
     display: none;
   }
 
@@ -1044,6 +1157,13 @@ dd {
   }
 
   .readout {
+    display: none;
+  }
+}
+
+/* the axis caption needs a wide strip; below this it would cover the bars */
+@media (max-width: 1280px) {
+  .strip-legend {
     display: none;
   }
 }

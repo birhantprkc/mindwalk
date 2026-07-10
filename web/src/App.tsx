@@ -159,6 +159,18 @@ export default function App() {
 
   const engine = useMemo(() => new PlaybackEngine(trace, city), [trace, city]);
   const playback = useMemo(() => engine.snapshotAt(currentSeq), [engine, currentSeq]);
+  // live tallies for the HUD spectrum; touchByPath mirrors the backend stats scope
+  const touchCounts = useMemo(() => {
+    let edited = 0;
+    let read = 0;
+    let seen = 0;
+    for (const touch of playback.touchByPath.values()) {
+      if (touch === "edit") edited++;
+      else if (touch === "read") read++;
+      else seen++;
+    }
+    return { edited, read, seen };
+  }, [playback]);
   const selectedFile = useMemo(
     () => (selectedPath ? city?.files.find((file) => file.path === selectedPath) : undefined),
     [city, selectedPath]
@@ -196,7 +208,15 @@ export default function App() {
           ) : (
             <CityScene city={city} playback={playback} selectedPath={selectedPath} onSelect={setSelectedPath} />
           )}
-          <Hud trace={trace} city={city} view={view} onViewChange={setView} />
+          <Hud
+            trace={trace}
+            city={city}
+            view={view}
+            editedNow={touchCounts.edited}
+            readNow={touchCounts.read}
+            seenNow={touchCounts.seen}
+            onViewChange={setView}
+          />
           {selectedFile ? (
             <Inspector
               file={selectedFile}
