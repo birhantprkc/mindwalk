@@ -47,6 +47,23 @@ interface HaloSlot {
   color: THREE.Color;
 }
 
+// map-style LOD for directory names: a label shows while its subtree spans
+// enough screen pixels — zoom out and only the big forks stay named, push
+// in and deeper directories surface where you're looking
+interface DirLabel {
+  sprite: THREE.Sprite;
+  x: number;
+  z: number;
+  radius: number;
+  fileCount: number;
+  depth: number;
+  aspect: number;
+  target: number;
+}
+const LABEL_Y = 1.8;
+const LABEL_MIN_SUBTREE_PX = 60;
+const LABEL_BUDGET = 120;
+
 export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const leafMeshRef = useRef<THREE.InstancedMesh | null>(null);
@@ -67,6 +84,8 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
   const groupRef = useRef<THREE.Group | null>(null);
   const trailRef = useRef<TrailRenderer | null>(null);
   const fireflyRef = useRef<THREE.Sprite | null>(null);
+  const labelsRef = useRef<DirLabel[]>([]);
+  const labelsDirtyRef = useRef(false);
   const frameRef = useRef<number | null>(null);
   const reducedRef = useRef(false);
   // camera fit deferred while the viewport reports no size (hidden pane,
@@ -163,11 +182,95 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     const observer = new ResizeObserver(resize);
     observer.observe(host);
 
+    // label LOD pass: reprojects directory subtrees whenever the camera or
+    // viewport moves, picks the labels whose subtree is prominent on screen,
+    // and drops whichever of two colliding labels matters less
+    const lastCamPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const lastCamQuat = new THREE.Quaternion(0, 0, 0, 0);
+    let lastViewW = 0;
+    let lastViewH = 0;
+    const labelPoint = new THREE.Vector3();
+    const computeLabelTargets = () => {
+      const labels = labelsRef.current;
+      if (labels.length === 0) return;
+      const w = renderer.domElement.clientWidth;
+      const h = renderer.domElement.clientHeight;
+      if (w === 0 || h === 0) return;
+      const moved =
+        labelsDirtyRef.current ||
+        !camera.position.equals(lastCamPos) ||
+        !camera.quaternion.equals(lastCamQuat) ||
+        w !== lastViewW ||
+        h !== lastViewH;
+      if (!moved) return;
+      labelsDirtyRef.current = false;
+      lastCamPos.copy(camera.position);
+      lastCamQuat.copy(camera.quaternion);
+      lastViewW = w;
+      lastViewH = h;
+
+      const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+      const maxDim = Math.max(w, h);
+      interface Candidate {
+        label: DirLabel;
+        sx: number;
+        sy: number;
+        pw: number;
+        ph: number;
+      }
+      const candidates: Candidate[] = [];
+      for (const label of labels) {
+        labelPoint.set(label.x, LABEL_Y, label.z);
+        const dist = labelPoint.distanceTo(camera.position);
+        const pxPerWorld = h / (2 * dist * tanV);
+        const subtreePx = label.radius * pxPerWorld;
+        labelPoint.project(camera);
+        const sx = ((labelPoint.x + 1) / 2) * w;
+        const sy = ((1 - labelPoint.y) / 2) * h;
+        const onScreen = labelPoint.z < 1 && sx > -60 && sx < w + 60 && sy > -40 && sy < h + 40;
+        // too small to matter, or so large we're inside it — either way the
+        // name would float over unrelated geometry
+        if (!onScreen || subtreePx < LABEL_MIN_SUBTREE_PX || subtreePx > maxDim * 1.6) {
+          label.target = 0;
+          continue;
+        }
+        // constant screen-size type, like map labels
+        const ph = label.depth <= 1 ? 15 : 13;
+        const worldH = ph / pxPerWorld;
+        label.sprite.scale.set(worldH * label.aspect, worldH, 1);
+        candidates.push({ label, sx, sy, pw: ph * label.aspect, ph });
+      }
+      candidates.sort((a, b) => b.label.fileCount - a.label.fileCount);
+      const kept: Candidate[] = [];
+      for (const candidate of candidates) {
+        const clash = kept.some(
+          (other) =>
+            Math.abs(other.sx - candidate.sx) < (other.pw + candidate.pw) / 2 + 14 &&
+            Math.abs(other.sy - candidate.sy) < (other.ph + candidate.ph) / 2 + 10
+        );
+        candidate.label.target = clash ? 0 : 1;
+        if (!clash) kept.push(candidate);
+      }
+    };
+
     const clock = new THREE.Clock();
     const matrix = new THREE.Matrix4();
     const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
     const render = () => {
       controls.update();
+      computeLabelTargets();
+
+      // labels ease toward their LOD targets
+      for (const label of labelsRef.current) {
+        const material = label.sprite.material as THREE.SpriteMaterial;
+        const diff = label.target - material.opacity;
+        if (Math.abs(diff) > 0.02) {
+          material.opacity = reducedRef.current ? label.target : material.opacity + diff * 0.16;
+        } else if (material.opacity !== label.target) {
+          material.opacity = label.target;
+        }
+        label.sprite.visible = material.opacity > 0.02;
+      }
 
       // pools of light grow toward their attention radius
       const halos = haloMeshRef.current;
@@ -359,22 +462,40 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     haloMeshRef.current = halos;
     group.add(halos);
 
-    // directory labels on the big branches
-    const labeled = [...layout.dirs]
-      .filter((dir) => dir.depth <= 2 && dir.fileCount >= Math.max(3, city.files.length * 0.015))
-      .sort((a, b) => b.fileCount - a.fileCount)
-      .slice(0, 18);
+    // directory labels: sprites for the biggest subtrees (screen-space LOD
+    // in the render loop decides which are visible); they start invisible
+    // and fade in once the first projection pass runs
+    const labels: DirLabel[] = [];
+    const labeled = [...layout.dirs].sort((a, b) => b.fileCount - a.fileCount).slice(0, LABEL_BUDGET);
     for (const dir of labeled) {
       const { texture, aspect } = labelTexture(dir.name);
       const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false, fog: false })
+        new THREE.SpriteMaterial({
+          map: texture,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          toneMapped: false,
+          fog: false
+        })
       );
-      const h = dir.depth === 1 ? 2.6 : 1.9;
-      sprite.scale.set(h * aspect * 0.58, h * 0.58, 1);
-      sprite.position.set(dir.x, 1.8, dir.z);
+      sprite.visible = false;
+      sprite.position.set(dir.x, LABEL_Y, dir.z);
       sprite.raycast = () => undefined;
       group.add(sprite);
+      labels.push({
+        sprite,
+        x: dir.x,
+        z: dir.z,
+        radius: dir.radius,
+        fileCount: dir.fileCount,
+        depth: dir.depth,
+        aspect,
+        target: 0
+      });
     }
+    labelsRef.current = labels;
+    labelsDirtyRef.current = true;
 
     const firefly = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -466,6 +587,7 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
       edgesRef.current = null;
       trailRef.current = null;
       fireflyRef.current = null;
+      labelsRef.current = [];
     };
   }, [city, layout]);
 

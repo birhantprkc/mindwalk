@@ -11,6 +11,10 @@ export interface TreeDir {
   z: number;
   depth: number;
   fileCount: number;
+  // how far the subtree's leaves reach from the fork, in layout units —
+  // the scene projects this to screen pixels to decide when the directory
+  // is prominent enough to deserve its label
+  radius: number;
 }
 
 export interface TreeEdge {
@@ -122,7 +126,8 @@ export function computeTreeLayout(files: CityFile[]): TreeLayout {
         x: pos.x,
         z: pos.z,
         depth: node.depth,
-        fileCount: node.leafCount
+        fileCount: node.leafCount,
+        radius: 0
       });
     }
   };
@@ -143,6 +148,21 @@ export function computeTreeLayout(files: CityFile[]): TreeLayout {
       childPath: dir.path,
       points: sampleEdge(parent.depth * step, parent.angle, node.depth * step, node.angle)
     });
+  }
+
+  // subtree reach: every leaf stretches the radius of each ancestor dir
+  const dirByPath = new Map(layout.dirs.map((dir) => [dir.path, dir]));
+  for (const file of files) {
+    const pos = layout.leaf.get(file.id);
+    if (!pos) continue;
+    const parts = file.path.split("/").filter(Boolean);
+    let path = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      path = path ? `${path}/${parts[i]}` : parts[i];
+      const dir = dirByPath.get(path);
+      if (!dir) continue;
+      dir.radius = Math.max(dir.radius, Math.hypot(pos.x - dir.x, pos.z - dir.z));
+    }
   }
 
   return layout;
