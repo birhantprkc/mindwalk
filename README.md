@@ -1,28 +1,77 @@
 # <img src="assets/logo.svg" alt="" width="30" /> mindwalk
 
-mindwalk renders Claude Code and Codex tool-calling sessions on top of a deterministic 3D code city. The first version is a local Go binary with a Vite/React/Three.js UI.
+Replay a coding agent's walk through your codebase.
 
-## What works in v1
+mindwalk reads Claude Code and Codex session logs, lines them up against the
+repository they touched, and plays the session back as light moving through a
+night map of the repo. Where the agent searched, read, and edited, the map
+glows — everything else stays dark. It runs entirely locally from one Go
+binary; no session data leaves your machine.
 
-- `mindwalk serve`: scans `~/.claude/projects` and `~/.codex/sessions`, serves the local UI, and opens a browser. Pass `--no-open` for headless verification.
-- `mindwalk open <session.jsonl>`: opens a specific Claude Code or Codex session; it also accepts `--no-open`.
-- `mindwalk build <repo> [-o citymap.json]`: builds a deterministic repository citymap.
-- `mindwalk trace <session.jsonl> [-o trace.json]`: parses a Claude Code or Codex JSONL session into normalized events.
-- Web UI: session list, 3D city, final touch-state coloring, timeline playback, recent transition edges, stats, and file visit history.
+![mindwalk replaying a session in the tree view](assets/screenshot.png)
 
-## Local development
+## Quick start
 
 ```sh
-make setup
-make test
-make serve
+make setup && make build
+bin/mindwalk
 ```
 
-The Go server serves `web/dist` from the working tree when it exists, then falls back to a tiny embedded placeholder. Run `make web` before `mindwalk serve` during development.
+With no arguments, mindwalk scans `~/.claude/projects` and `~/.codex/sessions`,
+serves the UI on a random local port, and opens a browser. The other commands:
+
+```text
+mindwalk serve [--port N] [--no-open] [--claude-dir DIR] [--codex-dir DIR]
+mindwalk open [--no-open] <session.jsonl>   open one specific session
+mindwalk build <repo> [-o out]              write the repository citymap JSON
+mindwalk trace <session> [-o out]           write the normalized trace JSON
+```
+
+## Reading the picture
+
+- **Tree view** — the repository as a radial tree: directories branch, files
+  are leaves, and glow ∝ depth × revisits.
+- **Terrain view** — the same data as a treemap plain, where height stands in
+  for glow.
+- **Touch states** — each file keeps the deepest touch it received: seen
+  (moss green), read (moon white), edited (warm amber), unvisited (dark). The
+  HUD counts them live, along with re-read and error rates.
+- **Playback deck** — scrub or play the session; the strip under the playhead
+  spells out every event's action (search / read / edit / verify / exec), and
+  recent transitions draw ember trails between files.
+
+Keyboard: `Space` play/pause · `←`/`→` step (`⇧` ×10) · `Home`/`End` jump to
+the ends · `S` cycle speed · `E` next edit · `X` next error · `M` next mark ·
+`⌘B` toggle the session rail.
+
+## How it works
+
+Two artifacts, kept deliberately separate:
+
+1. a **trace** — the session log normalized into an ordered stream of
+   file-touch events (`internal/adapter`, one adapter per agent format);
+2. a **citymap** — a deterministic layout of the repository
+   (`internal/citymap`); the same tree always produces the same map, so
+   replays are comparable across sessions.
+
+A local Go server (`internal/server`) joins the two and serves the
+React/Three.js frontend (`web`). `schema/` mirrors the exported JSON
+contracts.
+
+## Development
+
+```sh
+make setup   # install frontend dependencies
+make test    # go test + frontend build
+make serve   # dev server on :8765, serving web/dist from the working tree
+make build   # regenerate embedded assets and bin/mindwalk
+```
 
 ## Current limits
 
-- Claude Code and Codex main-chain sessions are supported first; Claude sidechain expansion is still future work.
-- The city layout is deterministic slice treemap v1, not the full squarified treemap described in the design note.
-- Session/repo commit alignment currently uses the live worktree and records the current commit; `git ls-tree` at the session commit is not implemented yet.
-- Cache is in-memory for trace/citymap requests. Persistent `~/.cache/mindwalk` storage remains a v1 follow-up.
+- Claude Code and Codex main-chain sessions only; Claude sidechain expansion
+  is future work.
+- Citymaps are built from the live worktree; alignment to the commit a session
+  actually ran against (`git ls-tree`) is not implemented yet.
+- Trace/citymap caching is in-memory; persistent `~/.cache/mindwalk` storage
+  is a follow-up.
