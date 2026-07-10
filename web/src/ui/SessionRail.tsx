@@ -1,6 +1,7 @@
 import { Eye, EyeOff, PanelLeftClose, RefreshCw, Search } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import { sessionVisible } from "../state/filters";
+import { LogoMark } from "./LogoMark";
 import { toggleRailShortcut } from "./shortcuts";
 import type { SessionMeta } from "../types";
 
@@ -54,7 +55,10 @@ export const SessionRail = memo(function SessionRail({
     <aside className={collapsed ? "session-rail collapsed" : "session-rail"}>
       <div className="rail-head">
         <h1 className="wordmark">
-          mindwalk<span className="spark">.</span>
+          <LogoMark />
+          <span>
+            mindwalk<span className="spark">.</span>
+          </span>
         </h1>
         <div className="rail-head-actions">
           <button className="icon-btn" onClick={onRefresh} title="Rescan sessions" aria-label="Rescan sessions">

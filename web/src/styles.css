@@ -144,12 +144,22 @@ dd {
 }
 
 .wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   font-family: var(--font-display);
   font-style: italic;
   font-weight: 480;
   font-size: 1.5rem;
   letter-spacing: 0.01em;
   line-height: 1;
+}
+
+/* the mark's tile is the night sky; a hairline keeps it a window, not a hole */
+.wordmark svg {
+  flex: none;
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px var(--hairline);
 }
 
 .wordmark .spark {

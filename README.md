@@ -1,4 +1,4 @@
-# mindwalk
+# <img src="assets/logo.svg" alt="" width="30" /> mindwalk
 
 mindwalk renders Claude Code and Codex tool-calling sessions on top of a deterministic 3D code city. The first version is a local Go binary with a Vite/React/Three.js UI.
 
