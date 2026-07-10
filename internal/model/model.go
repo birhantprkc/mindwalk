@@ -99,13 +99,36 @@ type Mark struct {
 }
 
 type Stats struct {
-	FilesInRepo           int     `json:"filesInRepo"`
-	Fovea                 int     `json:"fovea"`
-	Parafovea             int     `json:"parafovea"`
-	Edited                int     `json:"edited"`
-	EventsBeforeFirstEdit int     `json:"eventsBeforeFirstEdit"`
-	RegressionRate        float64 `json:"regressionRate"`
-	ErrorRate             float64 `json:"errorRate"`
+	FilesInRepo           int          `json:"filesInRepo"`
+	Fovea                 int          `json:"fovea"`
+	Parafovea             int          `json:"parafovea"`
+	Edited                int          `json:"edited"`
+	EventsBeforeFirstEdit int          `json:"eventsBeforeFirstEdit"`
+	RegressionRate        float64      `json:"regressionRate"`
+	ErrorRate             float64      `json:"errorRate"`
+	Actions               ActionCounts `json:"actions"`
+	Errors                ActionCounts `json:"errors"`
+	MaxEditsPerFile       int          `json:"maxEditsPerFile"`
+	// ChurnFiles counts files edited in three or more events.
+	ChurnFiles  int   `json:"churnFiles"`
+	UserTurns   int   `json:"userTurns"`
+	Compactions int   `json:"compactions"`
+	Subagents   int   `json:"subagents"`
+	ResultBytes int64 `json:"resultBytes"`
+	// EditsAfterLastVerify counts edit events after the last verify event;
+	// when the session never ran a verify it counts every edit event.
+	EditsAfterLastVerify int `json:"editsAfterLastVerify"`
+}
+
+// ActionCounts tallies events per action class; as Stats.Errors it tallies
+// only the events that returned an error.
+type ActionCounts struct {
+	Search int `json:"search"`
+	Read   int `json:"read"`
+	Edit   int `json:"edit"`
+	Exec   int `json:"exec"`
+	Verify int `json:"verify"`
+	Other  int `json:"other"`
 }
 
 type SessionMeta struct {

@@ -135,18 +135,31 @@ func actionFor(tool string, input map[string]any, result string) string {
 		if verifyCommand(command) {
 			return "verify"
 		}
+		if searchCommand(command) {
+			return "search"
+		}
 		return "exec"
 	case "exec":
 		commands := execCommands(input)
 		if len(commands) == 0 || !execHasOnlyStaticCommands(input, len(commands)) {
 			return "exec"
 		}
+		allVerify, allSearch := true, true
 		for _, command := range commands {
 			if !verifyCommand(command.command) {
-				return "exec"
+				allVerify = false
+			}
+			if !searchCommand(command.command) {
+				allSearch = false
 			}
 		}
-		return "verify"
+		if allVerify {
+			return "verify"
+		}
+		if allSearch {
+			return "search"
+		}
+		return "exec"
 	default:
 		_ = result
 		return "other"
@@ -661,6 +674,61 @@ func cleanExtractedPath(path string, allowTopLevel bool) (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+var envAssignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+var searchPrograms = map[string]bool{
+	"grep": true, "rg": true, "ag": true, "find": true, "fd": true,
+	"ls": true, "tree": true,
+}
+
+var readOnlyPrograms = map[string]bool{
+	"cd": true, "cat": true, "head": true, "tail": true, "wc": true,
+	"sort": true, "uniq": true, "cut": true, "awk": true, "echo": true,
+	"which": true, "file": true, "stat": true, "du": true, "pwd": true,
+	"dirname": true, "basename": true, "true": true,
+}
+
+// searchCommand reports whether a shell command only inspects the tree the
+// way Grep/Glob/LS would: every pipeline segment runs a read-only program and
+// at least one segment actually searches or lists. Conservative by design —
+// anything unrecognized stays "exec".
+func searchCommand(command string) bool {
+	cleaned := strings.NewReplacer("2>&1", " ", "2>/dev/null", " ", ">/dev/null", " ", "> /dev/null", " ").Replace(command)
+	searched := false
+	segments := strings.FieldsFunc(cleaned, func(r rune) bool {
+		return r == '|' || r == ';' || r == '&' || r == '\n'
+	})
+	for _, segment := range segments {
+		if strings.ContainsRune(segment, '>') {
+			return false
+		}
+		fields := strings.Fields(segment)
+		for len(fields) > 0 && envAssignRe.MatchString(fields[0]) {
+			fields = fields[1:]
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		program := strings.ToLower(filepath.Base(fields[0]))
+		if program == "git" && len(fields) > 1 && (fields[1] == "grep" || fields[1] == "ls-files") {
+			searched = true
+			continue
+		}
+		if searchPrograms[program] {
+			// find can mutate through -exec/-delete; keep those out of "search"
+			if strings.Contains(segment, "-exec") || strings.Contains(segment, "-delete") {
+				return false
+			}
+			searched = true
+			continue
+		}
+		if !readOnlyPrograms[program] {
+			return false
+		}
+	}
+	return searched
 }
 
 func verifyCommand(command string) bool {

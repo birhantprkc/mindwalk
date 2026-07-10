@@ -115,4 +115,24 @@ export interface Stats {
   eventsBeforeFirstEdit: number;
   regressionRate: number;
   errorRate: number;
+  actions: ActionCounts;
+  errors: ActionCounts;
+  maxEditsPerFile: number;
+  /** files edited in three or more events */
+  churnFiles: number;
+  userTurns: number;
+  compactions: number;
+  subagents: number;
+  resultBytes: number;
+  /** edit events after the last verify event; every edit event when the session never verified */
+  editsAfterLastVerify: number;
+}
+
+export interface ActionCounts {
+  search: number;
+  read: number;
+  edit: number;
+  exec: number;
+  verify: number;
+  other: number;
 }

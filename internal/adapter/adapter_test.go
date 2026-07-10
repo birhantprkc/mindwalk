@@ -126,6 +126,44 @@ func TestBuildEventExecActionRequiresEveryCommandToVerify(t *testing.T) {
 	}
 }
 
+func TestBuildEventClassifiesBashSearchCommands(t *testing.T) {
+	tests := []struct {
+		command string
+		want    string
+	}{
+		{`grep -rn "Pair with AI" src --include="*.ts" | head -5`, "search"},
+		{`find . -name "*.go" | wc -l`, "search"},
+		{`cd /repo && rg TODO internal`, "search"},
+		{`git grep -n hook`, "search"},
+		{`FOO=1 grep -c x file.txt 2>/dev/null`, "search"},
+		{`ls web/src`, "search"},
+		{`grep x file > out.txt`, "exec"},
+		{`find . -name "*.tmp" -delete`, "exec"},
+		{`grep x file && rm file`, "exec"},
+		{`npm install 2>&1 | tail -3`, "exec"},
+		{`echo done`, "exec"},
+		{`go test ./... | tail -5`, "verify"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			trace := &model.Trace{Session: model.TraceSession{Cwd: t.TempDir()}}
+			event := BuildEvent(trace, ToolCall{Name: "Bash", Input: map[string]any{"command": tt.command}}, ToolResult{})
+			if event.Action != tt.want {
+				t.Fatalf("action(%q) = %q, want %q", tt.command, event.Action, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildEventExecActionAllSearchCommands(t *testing.T) {
+	source := `Promise.all([tools.exec_command({cmd:"rg TODO main.go"}), tools.exec_command({cmd:"ls src"})])`
+	event := buildExecEvent(t.TempDir(), map[string]any{"_raw": source})
+	if event.Tool != "exec" || event.Action != "search" {
+		t.Fatalf("event = %#v, want action %q", event, "search")
+	}
+}
+
 func TestBuildEventDoesNotPairDistantExecWorkdir(t *testing.T) {
 	root := t.TempDir()
 	writeAdapterTestFile(t, root, "README.md")

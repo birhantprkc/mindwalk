@@ -1,5 +1,5 @@
 import { memo } from "react";
-import type { CityMap, Trace } from "../types";
+import type { ActionCounts, CityMap, Trace } from "../types";
 import type { SceneView } from "../state/store";
 
 interface HudProps {
@@ -65,14 +65,62 @@ export const Hud = memo(function Hud({ trace, city, view, editedNow, readNow, se
                 hint="Files in the map the agent never touched"
               />
             </div>
+            {/* two quiet rows: the session's shape, then its friction — final
+                totals only, unlike the playhead-live spectrum above */}
             <div className="hud-quiet">
               <span data-hint="Files in the repository map">{stats.filesInRepo} files</span>
+              <span data-hint={`Tool events — ${mixHint(stats.actions)}`}>
+                {countActions(stats.actions)} events
+              </span>
+              <span data-hint="User messages — each one starts a turn of agent work">
+                {stats.userTurns} turns
+              </span>
+              {stats.subagents > 0 ? (
+                <span data-hint="Subagent launches (Task/Agent)">
+                  {stats.subagents} subagent{stats.subagents === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              {stats.compactions > 0 ? (
+                <span data-hint="Context compactions — the conversation was summarized to free memory">
+                  {stats.compactions} compaction{stats.compactions === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              <span data-hint="Tool output the agent consumed over the session">
+                {fmtBytes(stats.resultBytes)} output
+              </span>
+            </div>
+            <div className="hud-quiet">
               <span data-hint="Reads that re-read a file unchanged since its last read">
                 re-reads {pct(stats.regressionRate)}
               </span>
-              <span data-hint="Tool calls that returned an error — press X to jump to the next one">
-                errors {pct(stats.errorRate)}
+              <span
+                data-hint={
+                  countActions(stats.errors) > 0
+                    ? `${mixHint(stats.errors)} — press X to jump to the next one`
+                    : "Tool calls that returned an error"
+                }
+              >
+                errors {countActions(stats.errors)}
               </span>
+              <span
+                className={stats.actions.verify === 0 && stats.actions.edit > 0 ? "warn" : ""}
+                data-hint="Commands recognized as builds or tests (go test, make test, npm run build, …) — pass/fail is not tracked"
+              >
+                verify ×{stats.actions.verify}
+              </span>
+              {stats.actions.verify > 0 && stats.editsAfterLastVerify > 0 ? (
+                <span className="warn" data-hint="Edit events after the session's last build or test run">
+                  {stats.editsAfterLastVerify} edits after last verify
+                </span>
+              ) : null}
+              {stats.churnFiles > 0 ? (
+                <span
+                  className="warn"
+                  data-hint={`Files edited in 3+ separate events — the most-edited file took ${stats.maxEditsPerFile} edits`}
+                >
+                  churn {stats.churnFiles} file{stats.churnFiles === 1 ? "" : "s"}
+                </span>
+              ) : null}
             </div>
           </>
         ) : null}
@@ -120,6 +168,24 @@ function SpectrumStat({
 
 function pct(rate: number): string {
   return `${Math.round(rate * 100)}%`;
+}
+
+const ACTION_ORDER = ["search", "read", "edit", "exec", "verify", "other"] as const;
+
+function countActions(counts: ActionCounts): number {
+  return ACTION_ORDER.reduce((sum, key) => sum + counts[key], 0);
+}
+
+function mixHint(counts: ActionCounts): string {
+  const parts = ACTION_ORDER.filter((key) => counts[key] > 0).map((key) => `${counts[key]} ${key}`);
+  return parts.length ? parts.join(" · ") : "none";
+}
+
+function fmtBytes(bytes: number): string {
+  const kb = bytes / 1024;
+  if (kb < 1) return `${bytes} B`;
+  if (kb < 1000) return `${Math.round(kb)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
 }
 
 function basename(path: string): string {

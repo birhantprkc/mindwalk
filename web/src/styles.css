@@ -480,6 +480,14 @@ dd {
   pointer-events: auto;
 }
 
+.hud-quiet + .hud-quiet {
+  margin-top: 3px;
+}
+
+.hud-quiet .warn {
+  color: var(--ember);
+}
+
 /* instant hover definitions — native title is too slow for an instrument */
 [data-hint] {
   position: relative;

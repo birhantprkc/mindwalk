@@ -9,9 +9,20 @@ func ComputeStats(trace *Trace, filesInRepo int) Stats {
 	errors := 0
 	firstEdit := -1
 
+	stats := Stats{FilesInRepo: filesInRepo}
+
 	for _, event := range trace.Events {
+		countAction(&stats.Actions, event.Action)
 		if event.IsError {
 			errors++
+			countAction(&stats.Errors, event.Action)
+		}
+		stats.ResultBytes += int64(event.ResultBytes)
+		switch event.Action {
+		case "verify":
+			stats.EditsAfterLastVerify = 0
+		case "edit":
+			stats.EditsAfterLastVerify++
 		}
 		for _, target := range event.Targets {
 			if target.Path == "" {
@@ -37,7 +48,6 @@ func ComputeStats(trace *Trace, filesInRepo int) Stats {
 		}
 	}
 
-	stats := Stats{FilesInRepo: filesInRepo}
 	if firstEdit >= 0 {
 		stats.EventsBeforeFirstEdit = firstEdit
 	} else {
@@ -55,6 +65,24 @@ func ComputeStats(trace *Trace, filesInRepo int) Stats {
 			stats.Parafovea++
 		}
 	}
+	for _, count := range editVersion {
+		if count > stats.MaxEditsPerFile {
+			stats.MaxEditsPerFile = count
+		}
+		if count >= 3 {
+			stats.ChurnFiles++
+		}
+	}
+	for _, mark := range trace.Marks {
+		switch mark.Type {
+		case "user-message":
+			stats.UserTurns++
+		case "compaction":
+			stats.Compactions++
+		case "subagent":
+			stats.Subagents++
+		}
+	}
 	if readEvents > 0 {
 		stats.RegressionRate = float64(repeatedReads) / float64(readEvents)
 	}
@@ -62,6 +90,23 @@ func ComputeStats(trace *Trace, filesInRepo int) Stats {
 		stats.ErrorRate = float64(errors) / float64(len(trace.Events))
 	}
 	return stats
+}
+
+func countAction(counts *ActionCounts, action string) {
+	switch action {
+	case "search":
+		counts.Search++
+	case "read":
+		counts.Read++
+	case "edit":
+		counts.Edit++
+	case "exec":
+		counts.Exec++
+	case "verify":
+		counts.Verify++
+	default:
+		counts.Other++
+	}
 }
 
 func RankTouch(touch string) int {

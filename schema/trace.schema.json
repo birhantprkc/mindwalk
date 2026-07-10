@@ -71,7 +71,24 @@
     },
     "stats": {
       "type": "object",
-      "required": ["filesInRepo", "fovea", "parafovea", "edited", "eventsBeforeFirstEdit", "regressionRate", "errorRate"],
+      "required": [
+        "filesInRepo",
+        "fovea",
+        "parafovea",
+        "edited",
+        "eventsBeforeFirstEdit",
+        "regressionRate",
+        "errorRate",
+        "actions",
+        "errors",
+        "maxEditsPerFile",
+        "churnFiles",
+        "userTurns",
+        "compactions",
+        "subagents",
+        "resultBytes",
+        "editsAfterLastVerify"
+      ],
       "properties": {
         "filesInRepo": { "type": "integer", "minimum": 0 },
         "fovea": { "type": "integer", "minimum": 0 },
@@ -79,13 +96,43 @@
         "edited": { "type": "integer", "minimum": 0 },
         "eventsBeforeFirstEdit": { "type": "integer", "minimum": 0 },
         "regressionRate": { "type": "number", "minimum": 0 },
-        "errorRate": { "type": "number", "minimum": 0 }
+        "errorRate": { "type": "number", "minimum": 0 },
+        "actions": { "$ref": "#/$defs/actionCounts" },
+        "errors": { "$ref": "#/$defs/actionCounts" },
+        "maxEditsPerFile": { "type": "integer", "minimum": 0 },
+        "churnFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Files edited in three or more events"
+        },
+        "userTurns": { "type": "integer", "minimum": 0 },
+        "compactions": { "type": "integer", "minimum": 0 },
+        "subagents": { "type": "integer", "minimum": 0 },
+        "resultBytes": { "type": "integer", "minimum": 0 },
+        "editsAfterLastVerify": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Edit events after the last verify event; every edit event when the session never verified"
+        }
       },
       "additionalProperties": false
     }
   },
   "additionalProperties": false,
   "$defs": {
+    "actionCounts": {
+      "type": "object",
+      "required": ["search", "read", "edit", "exec", "verify", "other"],
+      "properties": {
+        "search": { "type": "integer", "minimum": 0 },
+        "read": { "type": "integer", "minimum": 0 },
+        "edit": { "type": "integer", "minimum": 0 },
+        "exec": { "type": "integer", "minimum": 0 },
+        "verify": { "type": "integer", "minimum": 0 },
+        "other": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "target": {
       "type": "object",
       "required": ["path", "touch"],
