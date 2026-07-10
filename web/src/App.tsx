@@ -1,3 +1,4 @@
+import { PanelLeftOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { describeError, getSessionSnapshot, listSessions } from "./api/client";
 import { PlaybackEngine } from "./playback/reducer";
@@ -8,6 +9,7 @@ import { useAppStore } from "./state/store";
 import { Hud } from "./ui/Hud";
 import { Inspector } from "./ui/Inspector";
 import { SessionRail } from "./ui/SessionRail";
+import { toggleRailShortcut } from "./ui/shortcuts";
 import { Timeline } from "./ui/Timeline";
 import "./styles.css";
 
@@ -24,6 +26,7 @@ export default function App() {
     error,
     hideEmpty,
     harnessFilter,
+    railCollapsed,
     setView,
     setSessions,
     setActiveSession,
@@ -33,7 +36,8 @@ export default function App() {
     setLoading,
     setError,
     setHideEmpty,
-    setHarnessFilter
+    setHarnessFilter,
+    setRailCollapsed
   } = useAppStore();
   const urlSessionConsumed = useRef(false);
   const scanGeneration = useRef(0);
@@ -133,6 +137,21 @@ export default function App() {
     void loadSession(key);
   }, [loadSession, setActiveSession]);
 
+  // stable callbacks keep SessionRail's memo effective across playback ticks
+  const collapseRail = useCallback(() => setRailCollapsed(true), [setRailCollapsed]);
+  const expandRail = useCallback(() => setRailCollapsed(false), [setRailCollapsed]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "b" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      e.preventDefault();
+      const store = useAppStore.getState();
+      store.setRailCollapsed(!store.railCollapsed);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   useEffect(() => {
     void scan(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -146,20 +165,32 @@ export default function App() {
   );
 
   return (
-    <main className="app-frame">
+    <main className={railCollapsed ? "app-frame rail-collapsed" : "app-frame"}>
       <SessionRail
         sessions={sessions}
         activeKey={activeSessionKey}
         loading={loading}
         hideEmpty={hideEmpty}
         harnessFilter={harnessFilter}
+        collapsed={railCollapsed}
         onSelect={selectSession}
         onRefresh={refresh}
         onHideEmptyChange={setHideEmpty}
         onHarnessFilterChange={setHarnessFilter}
+        onCollapse={collapseRail}
       />
       <section className="stage">
         <div className="viewport">
+          {railCollapsed ? (
+            <button
+              className="rail-expand"
+              onClick={expandRail}
+              title={`Show sidebar (${toggleRailShortcut})`}
+              aria-label="Show session sidebar"
+            >
+              <PanelLeftOpen size={15} />
+            </button>
+          ) : null}
           {view === "tree" ? (
             <TreeScene city={city} playback={playback} selectedPath={selectedPath} onSelect={setSelectedPath} />
           ) : (

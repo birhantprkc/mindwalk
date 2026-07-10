@@ -1,6 +1,7 @@
-import { Eye, EyeOff, RefreshCw, Search } from "lucide-react";
+import { Eye, EyeOff, PanelLeftClose, RefreshCw, Search } from "lucide-react";
 import { memo, useMemo, useState } from "react";
 import { sessionVisible } from "../state/filters";
+import { toggleRailShortcut } from "./shortcuts";
 import type { SessionMeta } from "../types";
 
 interface SessionRailProps {
@@ -9,10 +10,12 @@ interface SessionRailProps {
   loading: boolean;
   hideEmpty: boolean;
   harnessFilter?: string;
+  collapsed: boolean;
   onSelect: (key: string) => void;
   onRefresh: () => void;
   onHideEmptyChange: (hide: boolean) => void;
   onHarnessFilterChange: (harness?: string) => void;
+  onCollapse: () => void;
 }
 
 // memo: the app re-renders every playback tick; the rail's props only change
@@ -23,10 +26,12 @@ export const SessionRail = memo(function SessionRail({
   loading,
   hideEmpty,
   harnessFilter,
+  collapsed,
   onSelect,
   onRefresh,
   onHideEmptyChange,
-  onHarnessFilterChange
+  onHarnessFilterChange,
+  onCollapse
 }: SessionRailProps) {
   const [query, setQuery] = useState("");
   const harnesses = useMemo(() => [...new Set(sessions.map((s) => s.harness))].sort(), [sessions]);
@@ -46,14 +51,24 @@ export const SessionRail = memo(function SessionRail({
   }, [sessions, query, hideEmpty, effectiveHarness, activeKey]);
 
   return (
-    <aside className="session-rail">
+    <aside className={collapsed ? "session-rail collapsed" : "session-rail"}>
       <div className="rail-head">
         <h1 className="wordmark">
           mindwalk<span className="spark">.</span>
         </h1>
-        <button className="icon-btn" onClick={onRefresh} title="Rescan sessions" aria-label="Rescan sessions">
-          <RefreshCw size={15} />
-        </button>
+        <div className="rail-head-actions">
+          <button className="icon-btn" onClick={onRefresh} title="Rescan sessions" aria-label="Rescan sessions">
+            <RefreshCw size={15} />
+          </button>
+          <button
+            className="icon-btn"
+            onClick={onCollapse}
+            title={`Hide sidebar (${toggleRailShortcut})`}
+            aria-label="Hide session sidebar"
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        </div>
       </div>
       <div className="rail-controls">
         <label className="rail-filter">

@@ -125,6 +125,15 @@ dd {
   flex-direction: column;
   background: var(--panel);
   border-right: 1px solid var(--hairline);
+  transition: margin 0.28s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s;
+}
+
+/* slide out by margin so the rail's content never reflows mid-transition;
+   visibility drops it from the tab order once hidden */
+.session-rail.collapsed {
+  margin-left: -293px;
+  visibility: hidden;
+  transition: margin 0.28s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s 0.28s;
 }
 
 .rail-head {
@@ -147,8 +156,35 @@ dd {
   color: var(--amber);
 }
 
+.rail-head-actions {
+  display: flex;
+  gap: 2px;
+}
+
 .rail-head .icon-btn {
   transform: translateY(2px);
+}
+
+/* reopens the rail once it has slid away; sits where the wordmark was */
+.rail-expand {
+  position: absolute;
+  top: 20px;
+  left: 24px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.rail-expand:hover {
+  color: var(--ink);
+  background: var(--panel-raised);
 }
 
 /* search + filter chips form one control zone above the list */
@@ -355,6 +391,12 @@ dd {
 
 .hud-left {
   min-width: 0;
+  transition: margin-left 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* clear the floating expand button */
+.rail-collapsed .hud-left {
+  margin-left: 42px;
 }
 
 .hud-repo {
@@ -955,6 +997,17 @@ dd {
     height: 224px;
     border-right: 0;
     border-bottom: 1px solid var(--hairline);
+  }
+
+  /* the rail is a top bar here, so it slides up instead of left */
+  .session-rail.collapsed {
+    margin-left: 0;
+    margin-top: -225px;
+  }
+
+  .rail-expand {
+    top: 14px;
+    left: 16px;
   }
 
   .rail-head {

@@ -16,6 +16,7 @@ interface AppState {
   error?: string;
   hideEmpty: boolean;
   harnessFilter?: string;
+  railCollapsed: boolean;
   setView: (view: SceneView) => void;
   setSessions: (sessions: SessionMeta[]) => void;
   setActiveSession: (key?: string) => void;
@@ -26,9 +27,20 @@ interface AppState {
   setError: (error?: string) => void;
   setHideEmpty: (hideEmpty: boolean) => void;
   setHarnessFilter: (harness?: string) => void;
+  setRailCollapsed: (collapsed: boolean) => void;
 }
 
 const initialFilters = loadFilters();
+
+const RAIL_COLLAPSED_KEY = "mindwalk.railCollapsed";
+
+function loadRailCollapsed(): boolean {
+  try {
+    return localStorage.getItem(RAIL_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 export const useAppStore = create<AppState>((set, get) => ({
   sessions: [],
@@ -37,6 +49,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   loading: false,
   hideEmpty: initialFilters.hideEmpty,
   harnessFilter: initialFilters.harness,
+  railCollapsed: loadRailCollapsed(),
   setView: (view) => set({ view }),
   setSessions: (sessions) => set({ sessions }),
   setActiveSession: (activeSessionKey) =>
@@ -53,5 +66,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   setHarnessFilter: (harnessFilter) => {
     set({ harnessFilter });
     saveFilters({ hideEmpty: get().hideEmpty, harness: harnessFilter });
+  },
+  setRailCollapsed: (railCollapsed) => {
+    set({ railCollapsed });
+    try {
+      localStorage.setItem(RAIL_COLLAPSED_KEY, railCollapsed ? "1" : "0");
+    } catch {
+      // storage unavailable: preference resets on next load
+    }
   }
 }));
