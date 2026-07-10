@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/cosmtrek/mindwalk/internal/adapter"
 	"github.com/cosmtrek/mindwalk/internal/model"
 )
 
@@ -50,7 +52,7 @@ func TestTraceStillLoadsWhenSessionCwdIsMissing(t *testing.T) {
 	}
 }
 
-func TestOpenSessionIDUsesInternalSessionIDAndFindSessionAcceptsBasename(t *testing.T) {
+func TestOpenSessionUsesUniqueKeyAndFindSessionAcceptsBasename(t *testing.T) {
 	claudeDir := t.TempDir()
 	session := filepath.Join(claudeDir, "renamed.jsonl")
 	writeServerSession(t, session,
@@ -58,8 +60,9 @@ func TestOpenSessionIDUsesInternalSessionIDAndFindSessionAcceptsBasename(t *test
 	)
 
 	s := New(Config{ClaudeDir: claudeDir, CodexDir: filepath.Join(t.TempDir(), "codex"), OpenSession: session})
-	if got := s.openSessionID(); got != "internal-id" {
-		t.Fatalf("openSessionID = %q", got)
+	wantKey := adapter.SessionKey("claude-code", session)
+	if got := s.openSessionKey(); got != wantKey {
+		t.Fatalf("openSessionKey = %q, want %q", got, wantKey)
 	}
 	meta, err := s.findSession("renamed")
 	if err != nil {
@@ -67,6 +70,52 @@ func TestOpenSessionIDUsesInternalSessionIDAndFindSessionAcceptsBasename(t *test
 	}
 	if meta.ID != "internal-id" {
 		t.Fatalf("meta = %#v", meta)
+	}
+}
+
+func TestDuplicateSessionIDsUseDistinctKeysAndCaches(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	repoRoot := t.TempDir()
+	first := filepath.Join(codexDir, "first.jsonl")
+	second := filepath.Join(codexDir, "second.jsonl")
+	for i, path := range []string{first, second} {
+		writeServerJSONL(t, path, map[string]any{
+			"timestamp": "2026-07-09T00:00:0" + strconv.Itoa(i) + "Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "shared-id",
+				"cwd": filepath.ToSlash(repoRoot),
+			},
+		})
+	}
+
+	s := New(Config{ClaudeDir: claudeDir, CodexDir: codexDir})
+	sessions, err := s.listSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+	if sessions[0].Key == "" || sessions[1].Key == "" || sessions[0].Key == sessions[1].Key {
+		t.Fatalf("session keys are not unique: %#v", sessions)
+	}
+
+	for _, session := range sessions {
+		trace, _, err := s.traceAndMap(session.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if trace.Session.Path != session.Path {
+			t.Fatalf("key %q loaded %q, want %q", session.Key, trace.Session.Path, session.Path)
+		}
+	}
+	if len(s.traces) != 2 {
+		t.Fatalf("trace cache entries = %d, want 2", len(s.traces))
+	}
+	if _, err := s.findSession("shared-id"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("duplicate legacy ID error = %v", err)
 	}
 }
 

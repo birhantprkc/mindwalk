@@ -3,6 +3,7 @@ package adapter
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +34,18 @@ type ToolCall struct {
 type ToolResult struct {
 	Content string
 	IsError bool
+}
+
+// SessionKey identifies one session file independently of the harness-level
+// session ID. Codex resume rollouts can share an ID across multiple files, so
+// IDs are display metadata rather than safe routing or cache keys.
+func SessionKey(harness, path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = filepath.Clean(path)
+	sum := sha256.Sum256([]byte(harness + "\x00" + path))
+	return fmt.Sprintf("%s-%x", harness, sum[:12])
 }
 
 func ReadJSONLines(r io.Reader, visit func([]byte)) error {

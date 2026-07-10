@@ -7,11 +7,11 @@ export interface SessionFilters {
 
 const STORAGE_KEY = "mindwalk.sessionFilters";
 
-// activeId keeps an explicitly opened session visible even when it has no
+// activeKey keeps an explicitly opened session visible even when it has no
 // calls; the harness filter is deliberate user intent, so it still applies
-export function sessionVisible(session: SessionMeta, filters: SessionFilters, activeId?: string): boolean {
+export function sessionVisible(session: SessionMeta, filters: SessionFilters, activeKey?: string): boolean {
   if (filters.harness && session.harness !== filters.harness) return false;
-  if (filters.hideEmpty && session.eventCount === 0 && session.id !== activeId) return false;
+  if (filters.hideEmpty && session.eventCount === 0 && session.key !== activeKey) return false;
   return true;
 }
 

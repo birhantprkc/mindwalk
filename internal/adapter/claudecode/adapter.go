@@ -74,7 +74,7 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 	defer f.Close()
 
 	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	meta := model.SessionMeta{ID: id, Harness: a.Harness(), Path: path}
+	meta := model.SessionMeta{Key: adapter.SessionKey(a.Harness(), path), ID: id, Harness: a.Harness(), Path: path}
 	recognized := false
 	err = adapter.ReadJSONLines(f, func(data []byte) {
 		var line rawLine

@@ -106,7 +106,7 @@ func (s *Server) Start(openBrowser bool) error {
 	if openBrowser {
 		pageURL := addr
 		if s.cfg.OpenSession != "" {
-			pageURL += "/?session=" + url.QueryEscape(s.openSessionID())
+			pageURL += "/?session=" + url.QueryEscape(s.openSessionKey())
 		}
 		_ = openURL(pageURL)
 	}
@@ -133,17 +133,17 @@ func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	id, resource := parts[0], parts[1]
+	selector, resource := parts[0], parts[1]
 	switch resource {
 	case "trace":
-		trace, _, err := s.traceAndMap(id)
+		trace, _, err := s.traceAndMap(selector)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		writeJSON(w, trace)
 	case "citymap":
-		_, city, err := s.traceAndMap(id)
+		_, city, err := s.traceAndMap(selector)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -176,7 +176,7 @@ func (s *Server) listSessions() ([]model.SessionMeta, error) {
 		if err == nil {
 			found := false
 			for i := range sessions {
-				if sessions[i].ID == meta.ID {
+				if sessions[i].Key == meta.Key {
 					sessions[i] = meta
 					found = true
 					break
@@ -316,6 +316,9 @@ func (s *Server) summarizeCached(source adapter.Source, path string, info fs.Fil
 	if err != nil {
 		return model.SessionMeta{}, err
 	}
+	if meta.Key == "" {
+		meta.Key = adapter.SessionKey(source.Harness(), path)
+	}
 	s.mu.Lock()
 	s.summaries[key] = summaryCacheEntry{size: info.Size(), modTime: info.ModTime(), meta: meta}
 	s.mu.Unlock()
@@ -332,53 +335,57 @@ func (s *Server) pruneSummaryCache(seen map[string]bool) {
 	}
 }
 
-func (s *Server) traceAndMap(id string) (*model.Trace, *model.CityMap, error) {
+func (s *Server) traceAndMap(selector string) (*model.Trace, *model.CityMap, error) {
+	meta, err := s.findSession(selector)
+	if err != nil {
+		return nil, nil, err
+	}
+	key := meta.Key
+	if key == "" {
+		key = adapter.SessionKey(meta.Harness, meta.Path)
+	}
 	s.mu.Lock()
-	if trace := s.traces[id]; trace != nil {
-		if time.Since(s.cacheAt[id]) < traceCacheTTL {
-			city := s.maps[id]
-			s.cacheUsed[id] = time.Now()
+	if trace := s.traces[key]; trace != nil {
+		if time.Since(s.cacheAt[key]) < traceCacheTTL {
+			city := s.maps[key]
+			s.cacheUsed[key] = time.Now()
 			s.mu.Unlock()
 			return trace, city, nil
 		}
-		s.deleteTraceCacheLocked(id)
+		s.deleteTraceCacheLocked(key)
 	}
-	if load := s.inflight[id]; load != nil {
+	if load := s.inflight[key]; load != nil {
 		done := load.done
 		s.mu.Unlock()
 		<-done
 		return load.trace, load.city, load.err
 	}
 	load := &inflightLoad{done: make(chan struct{})}
-	s.inflight[id] = load
+	s.inflight[key] = load
 	s.mu.Unlock()
 
-	trace, city, err := s.loadTraceAndMap(id)
+	trace, city, err := s.loadTraceAndMap(meta)
 
 	s.mu.Lock()
 	if err == nil {
-		s.traces[id] = trace
-		s.maps[id] = city
+		s.traces[key] = trace
+		s.maps[key] = city
 		now := time.Now()
-		s.cacheAt[id] = now
-		s.cacheUsed[id] = now
+		s.cacheAt[key] = now
+		s.cacheUsed[key] = now
 		s.evictTraceCacheLocked()
 	}
 	load.trace = trace
 	load.city = city
 	load.err = err
-	delete(s.inflight, id)
+	delete(s.inflight, key)
 	close(load.done)
 	s.mu.Unlock()
 
 	return trace, city, err
 }
 
-func (s *Server) loadTraceAndMap(id string) (*model.Trace, *model.CityMap, error) {
-	meta, err := s.findSession(id)
-	if err != nil {
-		return nil, nil, err
-	}
+func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.CityMap, error) {
 	source := s.adapterForHarness(meta.Harness)
 	if source == nil {
 		return nil, nil, fmt.Errorf("no adapter for harness %q", meta.Harness)
@@ -441,50 +448,63 @@ func repoFileCount(city *model.CityMap) int {
 	return count
 }
 
-func (s *Server) findSession(id string) (model.SessionMeta, error) {
+func (s *Server) findSession(selector string) (model.SessionMeta, error) {
 	sessions, err := s.listSessions()
 	if err != nil {
 		return model.SessionMeta{}, err
 	}
 	for _, session := range sessions {
-		if session.ID == id || strings.TrimSuffix(filepath.Base(session.Path), filepath.Ext(session.Path)) == id {
+		if session.Key == selector {
 			return session, nil
 		}
+	}
+	var matches []model.SessionMeta
+	for _, session := range sessions {
+		basename := strings.TrimSuffix(filepath.Base(session.Path), filepath.Ext(session.Path))
+		if session.ID == selector || basename == selector {
+			matches = append(matches, session)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return model.SessionMeta{}, fmt.Errorf("session selector %q is ambiguous; use the session key", selector)
 	}
 	return model.SessionMeta{}, errors.New("session not found")
 }
 
-func (s *Server) deleteTraceCacheLocked(id string) {
-	delete(s.traces, id)
-	delete(s.maps, id)
-	delete(s.cacheAt, id)
-	delete(s.cacheUsed, id)
+func (s *Server) deleteTraceCacheLocked(key string) {
+	delete(s.traces, key)
+	delete(s.maps, key)
+	delete(s.cacheAt, key)
+	delete(s.cacheUsed, key)
 }
 
 func (s *Server) evictTraceCacheLocked() {
 	for len(s.traces) > traceCacheMaxEntries {
-		var oldestID string
+		var oldestKey string
 		var oldest time.Time
-		for id := range s.traces {
-			used := s.cacheUsed[id]
-			if oldestID == "" || used.Before(oldest) {
-				oldestID = id
+		for key := range s.traces {
+			used := s.cacheUsed[key]
+			if oldestKey == "" || used.Before(oldest) {
+				oldestKey = key
 				oldest = used
 			}
 		}
-		if oldestID == "" {
+		if oldestKey == "" {
 			return
 		}
-		s.deleteTraceCacheLocked(oldestID)
+		s.deleteTraceCacheLocked(oldestKey)
 	}
 }
 
-func (s *Server) openSessionID() string {
-	id := strings.TrimSuffix(filepath.Base(s.cfg.OpenSession), filepath.Ext(s.cfg.OpenSession))
-	if meta, err := s.summarizeAnyCached(s.cfg.OpenSession, nil); err == nil && meta.ID != "" {
-		id = meta.ID
+func (s *Server) openSessionKey() string {
+	key := strings.TrimSuffix(filepath.Base(s.cfg.OpenSession), filepath.Ext(s.cfg.OpenSession))
+	if meta, err := s.summarizeAnyCached(s.cfg.OpenSession, nil); err == nil && meta.Key != "" {
+		key = meta.Key
 	}
-	return id
+	return key
 }
 
 func (s *Server) adapterForHarness(harness string) adapter.Source {

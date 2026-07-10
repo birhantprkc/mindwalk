@@ -14,7 +14,7 @@ import "./styles.css";
 export default function App() {
   const {
     sessions,
-    activeSessionId,
+    activeSessionKey,
     trace,
     city,
     currentSeq,
@@ -46,22 +46,28 @@ export default function App() {
       let preferred: string | undefined;
       if (!urlSessionConsumed.current) {
         urlSessionConsumed.current = true;
-        const fromUrl = new URL(window.location.href).searchParams.get("session") ?? undefined;
-        if (fromUrl && data.some((session) => session.id === fromUrl)) {
+        const selector = new URL(window.location.href).searchParams.get("session") ?? undefined;
+        const exact = selector ? data.find((session) => session.key === selector) : undefined;
+        const legacyMatches = selector && !exact ? data.filter((session) => session.id === selector) : [];
+        const fromUrl = exact?.key ?? (legacyMatches.length === 1 ? legacyMatches[0].key : undefined);
+        if (fromUrl) {
           preferred = fromUrl;
-        } else if (fromUrl) {
-          console.warn(`session "${fromUrl}" not found; falling back to the latest session`);
+        } else if (legacyMatches.length > 1) {
+          console.warn(`session id "${selector}" is ambiguous; falling back to the latest session`);
+        } else if (selector) {
+          console.warn(`session "${selector}" not found; falling back to the latest session`);
         }
       }
-      // a session can disappear between scans; fall back instead of pinning a dead id
-      const stillListed = activeSessionId !== undefined && data.some((session) => session.id === activeSessionId);
+      // a session can disappear between scans; fall back instead of pinning a dead key
+      const stillListed =
+        activeSessionKey !== undefined && data.some((session) => session.key === activeSessionKey);
       // prefer a session the rail will actually show; if the filters hide
       // everything, the newest session still beats a blank stage
       const fallback = (
         data.find((session) => sessionVisible(session, { hideEmpty, harness: harnessFilter })) ?? data[0]
-      )?.id;
-      const next = preferred ?? (stillListed ? activeSessionId : fallback);
-      if (next && next !== activeSessionId) {
+      )?.key;
+      const next = preferred ?? (stillListed ? activeSessionKey : fallback);
+      if (next && next !== activeSessionKey) {
         setActiveSession(next);
       }
     } catch (err) {
@@ -69,7 +75,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId, harnessFilter, hideEmpty, setActiveSession, setError, setLoading, setSessions]);
+  }, [activeSessionKey, harnessFilter, hideEmpty, setActiveSession, setError, setLoading, setSessions]);
 
   useEffect(() => {
     void refresh();
@@ -77,13 +83,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeSessionId) return;
+    if (!activeSessionKey) return;
     // rapid session switches: a slow response for the previous session must
     // not overwrite the newer one, nor clear its loading state early
     let stale = false;
     setLoading(true);
     setError(undefined);
-    Promise.all([getTrace(activeSessionId), getCityMap(activeSessionId)])
+    Promise.all([getTrace(activeSessionKey), getCityMap(activeSessionKey)])
       .then(([nextTrace, nextCity]) => {
         if (stale) return;
         setData(nextTrace, nextCity);
@@ -98,7 +104,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [activeSessionId, setData, setError, setLoading, setSelectedPath]);
+  }, [activeSessionKey, setData, setError, setLoading, setSelectedPath]);
 
   const engine = useMemo(() => new PlaybackEngine(trace, city), [trace, city]);
   const playback = useMemo(() => engine.snapshotAt(currentSeq), [engine, currentSeq]);
@@ -111,7 +117,7 @@ export default function App() {
     <main className="app-frame">
       <SessionRail
         sessions={sessions}
-        activeId={activeSessionId}
+        activeKey={activeSessionKey}
         loading={loading}
         hideEmpty={hideEmpty}
         harnessFilter={harnessFilter}

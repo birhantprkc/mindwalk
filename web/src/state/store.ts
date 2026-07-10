@@ -6,7 +6,7 @@ export type SceneView = "tree" | "terrain";
 
 interface AppState {
   sessions: SessionMeta[];
-  activeSessionId?: string;
+  activeSessionKey?: string;
   trace?: Trace;
   city?: CityMap;
   currentSeq: number;
@@ -18,7 +18,7 @@ interface AppState {
   harnessFilter?: string;
   setView: (view: SceneView) => void;
   setSessions: (sessions: SessionMeta[]) => void;
-  setActiveSession: (id: string) => void;
+  setActiveSession: (key: string) => void;
   setData: (trace: Trace, city: CityMap) => void;
   setCurrentSeq: (seq: number) => void;
   setSelectedPath: (path?: string) => void;
@@ -39,7 +39,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   harnessFilter: initialFilters.harness,
   setView: (view) => set({ view }),
   setSessions: (sessions) => set({ sessions }),
-  setActiveSession: (activeSessionId) => set({ activeSessionId, trace: undefined, city: undefined, currentSeq: 0 }),
+  setActiveSession: (activeSessionKey) =>
+    set({ activeSessionKey, trace: undefined, city: undefined, currentSeq: 0 }),
   setData: (trace, city) => set({ trace, city, currentSeq: Math.max(0, trace.events.length - 1) }),
   setCurrentSeq: (currentSeq) => set({ currentSeq }),
   setSelectedPath: (selectedPath) => set({ selectedPath }),

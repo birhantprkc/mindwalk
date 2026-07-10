@@ -5,11 +5,11 @@ import type { SessionMeta } from "../types";
 
 interface SessionRailProps {
   sessions: SessionMeta[];
-  activeId?: string;
+  activeKey?: string;
   loading: boolean;
   hideEmpty: boolean;
   harnessFilter?: string;
-  onSelect: (id: string) => void;
+  onSelect: (key: string) => void;
   onRefresh: () => void;
   onHideEmptyChange: (hide: boolean) => void;
   onHarnessFilterChange: (harness?: string) => void;
@@ -19,7 +19,7 @@ interface SessionRailProps {
 // on scans, session switches, and filter changes
 export const SessionRail = memo(function SessionRail({
   sessions,
-  activeId,
+  activeKey,
   loading,
   hideEmpty,
   harnessFilter,
@@ -37,13 +37,13 @@ export const SessionRail = memo(function SessionRail({
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
     return sessions.filter((session) => {
-      if (!sessionVisible(session, { hideEmpty, harness: effectiveHarness }, activeId)) return false;
+      if (!sessionVisible(session, { hideEmpty, harness: effectiveHarness }, activeKey)) return false;
       if (!q) return true;
       return `${session.title ?? ""} ${session.id} ${session.gitBranch ?? ""} ${session.harness}`
         .toLowerCase()
         .includes(q);
     });
-  }, [sessions, query, hideEmpty, effectiveHarness, activeId]);
+  }, [sessions, query, hideEmpty, effectiveHarness, activeKey]);
 
   return (
     <aside className="session-rail">
@@ -108,11 +108,9 @@ export const SessionRail = memo(function SessionRail({
       <div className="session-list" aria-busy={loading}>
         {shown.map((session) => (
           <button
-            // codex resume rollouts reuse the session id across files, so
-            // only the path is unique per row
-            key={session.path}
-            className={session.id === activeId ? "session-row active" : "session-row"}
-            onClick={() => onSelect(session.id)}
+            key={session.key}
+            className={session.key === activeKey ? "session-row active" : "session-row"}
+            onClick={() => onSelect(session.key)}
           >
             <span className="session-title">{session.title || session.id}</span>
             <span className="session-meta">

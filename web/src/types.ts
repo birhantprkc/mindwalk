@@ -2,6 +2,7 @@ export type Action = "search" | "read" | "edit" | "exec" | "verify" | "other";
 export type Touch = "hit" | "read" | "edit";
 
 export interface SessionMeta {
+  key: string;
   id: string;
   harness: string;
   title?: string;

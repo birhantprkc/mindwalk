@@ -109,6 +109,7 @@ type Stats struct {
 }
 
 type SessionMeta struct {
+	Key        string `json:"key"`
 	ID         string `json:"id"`
 	Harness    string `json:"harness"`
 	Title      string `json:"title,omitempty"`
