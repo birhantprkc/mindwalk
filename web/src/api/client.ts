@@ -19,8 +19,8 @@ export function describeError(err: unknown, doing: string): string {
   return detail ? `Couldn't finish ${doing}: ${detail}` : `Couldn't finish ${doing}`;
 }
 
-export function listSessions(): Promise<SessionMeta[]> {
-  return getJSON<SessionMeta[]>("/api/sessions");
+export function listSessions(fresh = false): Promise<SessionMeta[]> {
+  return getJSON<SessionMeta[]>(fresh ? "/api/sessions?fresh=1" : "/api/sessions");
 }
 
 export function getTrace(key: string): Promise<Trace> {
@@ -29,4 +29,8 @@ export function getTrace(key: string): Promise<Trace> {
 
 export function getCityMap(key: string): Promise<CityMap> {
   return getJSON<CityMap>(`/api/sessions/${encodeURIComponent(key)}/citymap`);
+}
+
+export function getSessionSnapshot(key: string): Promise<{ trace: Trace; city: CityMap }> {
+  return getJSON<{ trace: Trace; city: CityMap }>(`/api/sessions/${encodeURIComponent(key)}/snapshot`);
 }

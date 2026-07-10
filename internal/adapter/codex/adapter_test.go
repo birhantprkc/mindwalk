@@ -109,6 +109,256 @@ func TestParseCodexSession(t *testing.T) {
 	}
 }
 
+func TestParseCodexCustomCallsCanonicalizesOrderAndPatchResults(t *testing.T) {
+	root := t.TempDir()
+	readme := filepath.Join(root, "README.md")
+	added := filepath.Join(root, "added.go")
+	if err := os.WriteFile(readme, []byte("# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "custom.jsonl")
+	failed := false
+	succeeded := true
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "custom-demo",
+				"cwd": filepath.ToSlash(root),
+			},
+		},
+		userMessage("2026-07-10T00:00:01Z", "before calls"),
+		customCall("2026-07-10T00:00:02Z", "", "", "apply_patch", "*** Begin Patch\n"),
+		customCall("2026-07-10T00:00:03Z", "ctc-patch", "call-patch", "apply_patch", "*** Begin Patch\n*** Update File: README.md\n*** End Patch\n"),
+		userMessage("2026-07-10T00:00:04Z", "between call and output"),
+		customOutput("2026-07-10T00:00:05Z", "call-late", "orphan output"),
+		customCall("2026-07-10T00:00:06Z", "ctc-image", "call-image", "view_image", map[string]any{
+			"path": filepath.ToSlash(readme),
+		}),
+		customOutput("2026-07-10T00:00:07Z", "call-image", []any{map[string]any{"text": "first image output"}}),
+		customOutput("2026-07-10T00:00:08Z", "call-image", "Process exited with code 1"),
+		customOutput("2026-07-10T00:00:09Z", "call-patch", "first patch output"),
+		customOutput("2026-07-10T00:00:10Z", "call-patch", "second patch output"),
+		patchApplyEnd("2026-07-10T00:00:11Z", "call-patch", &failed, map[string]string{
+			filepath.ToSlash(readme): "update",
+			filepath.ToSlash(added):  "add",
+		}),
+		patchApplyEnd("2026-07-10T00:00:12Z", "call-patch", &succeeded, map[string]string{
+			filepath.Join(root, "ignored.go"): "add",
+		}),
+		patchApplyEnd("2026-07-10T00:00:13Z", "orphan-patch", &failed, map[string]string{
+			filepath.Join(root, "orphan.go"): "add",
+		}),
+		call("2026-07-10T00:00:14Z", "fc-late", "call-late", "exec_command", map[string]any{
+			"cmd":     "go test ./...",
+			"workdir": filepath.ToSlash(root),
+		}),
+		userMessage("2026-07-10T00:00:15Z", "after calls"),
+		customCall("2026-07-10T00:00:16Z", "duplicate", "call-patch", "view_image", map[string]any{
+			"path": filepath.Join(root, "ignored.png"),
+		}),
+	)
+
+	a := Adapter{}
+	meta, err := a.Summarize(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.EventCount != 3 {
+		t.Fatalf("event count = %d, want 3", meta.EventCount)
+	}
+
+	trace, err := a.Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Session.EventCount != meta.EventCount || len(trace.Events) != 3 {
+		t.Fatalf("meta events = %d, trace session events = %d, events = %d", meta.EventCount, trace.Session.EventCount, len(trace.Events))
+	}
+	if len(trace.Marks) != 3 || trace.Marks[0].Seq != 0 || trace.Marks[1].Seq != 1 || trace.Marks[2].Seq != 3 {
+		t.Fatalf("marks = %#v", trace.Marks)
+	}
+	patchEvent := trace.Events[0]
+	if patchEvent.Tool != "apply_patch" || patchEvent.Action != "edit" || !patchEvent.IsError || patchEvent.ResultBytes != len("first patch output") {
+		t.Fatalf("patch event = %#v", patchEvent)
+	}
+	if len(patchEvent.Targets) != 2 || patchEvent.Targets[0].Path != "README.md" || patchEvent.Targets[1].Path != "added.go" {
+		t.Fatalf("patch targets = %#v", patchEvent.Targets)
+	}
+	imageEvent := trace.Events[1]
+	if imageEvent.Tool != "view_image" || imageEvent.IsError || imageEvent.ResultBytes != len("first image output") {
+		t.Fatalf("image event = %#v", imageEvent)
+	}
+	if len(imageEvent.Targets) != 1 || imageEvent.Targets[0].Path != "README.md" {
+		t.Fatalf("image targets = %#v", imageEvent.Targets)
+	}
+	lateEvent := trace.Events[2]
+	if lateEvent.Tool != "exec_command" || lateEvent.Action != "verify" || lateEvent.ResultBytes != 0 || lateEvent.IsError {
+		t.Fatalf("late event = %#v", lateEvent)
+	}
+}
+
+func TestPatchApplyEndSuccessOverridesTextualFailure(t *testing.T) {
+	root := t.TempDir()
+	session := filepath.Join(t.TempDir(), "patch-success.jsonl")
+	succeeded := true
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "patch-success",
+				"cwd": filepath.ToSlash(root),
+			},
+		},
+		customCall("2026-07-10T00:00:01Z", "ctc", "call-patch", "apply_patch", "*** Begin Patch\n*** Add File: added.go\n*** End Patch\n"),
+		customOutput("2026-07-10T00:00:02Z", "call-patch", "Process exited with code 1"),
+		patchApplyEnd("2026-07-10T00:00:03Z", "call-patch", &succeeded, map[string]string{
+			filepath.Join(root, "added.go"): "add",
+		}),
+	)
+
+	trace, err := (Adapter{}).Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trace.Events) != 1 || trace.Events[0].IsError {
+		t.Fatalf("events = %#v", trace.Events)
+	}
+}
+
+func TestParseCodexCustomExec(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "custom-exec.jsonl")
+	script := `const r = await tools.exec_command({"cmd":"sed -n '1,20p' README.md","workdir":` + mustJSON(t, filepath.ToSlash(root)) + `}); text(r.output);`
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "custom-exec",
+				"cwd": filepath.ToSlash(root),
+			},
+		},
+		customCall("2026-07-10T00:00:01Z", "ctc", "call-exec", "exec", script),
+		customOutput("2026-07-10T00:00:02Z", "call-exec", []any{map[string]any{"type": "input_text", "text": "# Demo\n"}}),
+	)
+
+	a := Adapter{}
+	meta, err := a.Summarize(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace, err := a.Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.EventCount != 1 || len(trace.Events) != 1 {
+		t.Fatalf("meta=%d events=%d", meta.EventCount, len(trace.Events))
+	}
+	event := trace.Events[0]
+	if event.Tool != "exec" || event.Action != "exec" || len(event.Targets) != 1 || event.Targets[0].Path != "README.md" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestCallIDFallsBackToResponseID(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "README.md")
+	if err := os.WriteFile(path, []byte("# Demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "fallback-id.jsonl")
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "fallback-session",
+				"cwd": filepath.ToSlash(root),
+			},
+		},
+		customCall("2026-07-10T00:00:01Z", "fallback-call", "", "view_image", map[string]any{"path": path}),
+		customOutput("2026-07-10T00:00:02Z", "fallback-call", "ok"),
+	)
+
+	a := Adapter{}
+	meta, err := a.Summarize(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace, err := a.Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.EventCount != 1 || len(trace.Events) != 1 || trace.Events[0].ResultBytes != 2 {
+		t.Fatalf("meta=%#v events=%#v", meta, trace.Events)
+	}
+}
+
+func TestParseCodexJSRepl(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "packages", "db", "src", "index.ts")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("export const db = {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(t.TempDir(), "js-repl.jsonl")
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "js-repl",
+				"cwd": filepath.ToSlash(root),
+			},
+		},
+		customCall("2026-07-10T00:00:01Z", "ctc", "call-js", "js_repl", `await import("./packages/db/src/index.ts")`),
+		customOutput("2026-07-10T00:00:02Z", "call-js", "loaded"),
+	)
+
+	trace, err := (Adapter{}).Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trace.Events) != 1 {
+		t.Fatalf("events = %#v", trace.Events)
+	}
+	event := trace.Events[0]
+	if event.Tool != "js_repl" || event.Action != "exec" || len(event.Targets) != 1 || event.Targets[0].Path != "packages/db/src/index.ts" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestCommandOutputFailedVariants(t *testing.T) {
+	tests := []struct {
+		output string
+		want   bool
+	}{
+		{output: "Process exited with code 1", want: true},
+		{output: "Exit code: 2", want: true},
+		{output: `{"output":"ok","metadata":{"exit_code":0}}`, want: false},
+		{output: `{"output":"failed","metadata":{"exit_code":1}}`, want: true},
+		{output: `{"output":"failed","exit_code":3}`, want: true},
+		{output: `{"output":"Exit code: 1","metadata":{"exit_code":0}}`, want: false},
+		{output: "Script completed\nWall time 0.1 seconds\nOutput:\nExit code: 1", want: false},
+		{output: "Script running with cell ID 28\nExit code: 1", want: false},
+		{output: "Script failed\nExit code: 0", want: true},
+		{output: "plain output", want: false},
+	}
+	for _, tt := range tests {
+		if got := commandOutputFailed(tt.output); got != tt.want {
+			t.Errorf("commandOutputFailed(%q) = %v, want %v", tt.output, got, tt.want)
+		}
+	}
+}
+
 func TestListSessionsSkipsNonCodexJSONL(t *testing.T) {
 	dir := t.TempDir()
 	writeJSONL(t, filepath.Join(dir, "not-codex.jsonl"), map[string]any{
@@ -133,6 +383,144 @@ func TestListSessionsSkipsNonCodexJSONL(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].ID != "codex-list" {
 		t.Fatalf("sessions = %#v", sessions)
+	}
+}
+
+func TestListSessionsSkipsCodexSubagents(t *testing.T) {
+	dir := t.TempDir()
+	mainSession := filepath.Join(dir, "main.jsonl")
+	legacySession := filepath.Join(dir, "legacy.jsonl")
+	subagentSession := filepath.Join(dir, "subagent.jsonl")
+	transitionalSubagentSession := filepath.Join(dir, "transitional-subagent.jsonl")
+	writeJSONL(t, mainSession,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":             "main-thread",
+				"cwd":            "/tmp",
+				"thread_source":  "user",
+				"source":         "vscode",
+				"forked_from_id": "user-owned-parent",
+			},
+		},
+		// Only the first valid session_meta controls visibility. Later context
+		// records must not turn a main thread into an auxiliary session.
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:00.500Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "replayed-child-context",
+				"cwd": "/tmp",
+				"source": map[string]any{
+					"subagent": "replayed-child-context",
+				},
+			},
+		},
+	)
+	writeJSONL(t, subagentSession,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:01Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "child-thread",
+				"cwd": "/tmp",
+				"source": map[string]any{
+					"subagent": map[string]any{
+						"thread_spawn": map[string]any{"parent_thread_id": "main-thread"},
+					},
+				},
+			},
+		},
+		// Forked context can replay parent metadata. The first record remains
+		// authoritative for deciding whether this file belongs in the list.
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:02Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":     "main-thread",
+				"cwd":    "/tmp",
+				"source": "vscode",
+			},
+		},
+		call("2026-07-10T00:00:03Z", "fc-child", "call-child", "exec_command", map[string]any{
+			"cmd":     "pwd",
+			"workdir": "/tmp",
+		}),
+		output("2026-07-10T00:00:04Z", "call-child", "Chunk ID: child\nProcess exited with code 0\nOutput:\n/tmp\n"),
+	)
+	writeJSONL(t, transitionalSubagentSession, map[string]any{
+		"timestamp": "2026-07-10T00:00:03Z",
+		"type":      "session_meta",
+		"payload": map[string]any{
+			"id":            "transitional-child",
+			"cwd":           "/tmp",
+			"thread_source": "subagent",
+			"source":        "vscode",
+		},
+	})
+	writeJSONL(t, legacySession, map[string]any{
+		"id":        "legacy-main",
+		"timestamp": "2025-06-13T14:42:30.751Z",
+	})
+
+	adapter := Adapter{Dir: dir}
+	mainMeta, err := adapter.Summarize(mainSession)
+	if err != nil || mainMeta.Auxiliary {
+		t.Fatalf("main meta = %#v, err = %v", mainMeta, err)
+	}
+	subagentMeta, err := adapter.Summarize(subagentSession)
+	if err != nil || !subagentMeta.Auxiliary || subagentMeta.ID != "child-thread" || subagentMeta.EventCount != 1 {
+		t.Fatalf("subagent meta = %#v, err = %v", subagentMeta, err)
+	}
+	subagentTrace, err := adapter.Parse(subagentSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subagentTrace.Session.ID != subagentMeta.ID || subagentTrace.Session.Title != subagentMeta.Title ||
+		subagentTrace.Session.EndedAt != subagentMeta.EndedAt || subagentTrace.Session.EventCount != subagentMeta.EventCount {
+		t.Fatalf("subagent summary/trace mismatch: meta=%#v trace=%#v", subagentMeta, subagentTrace.Session)
+	}
+	transitionalMeta, err := adapter.Summarize(transitionalSubagentSession)
+	if err != nil || !transitionalMeta.Auxiliary {
+		t.Fatalf("transitional subagent meta = %#v, err = %v", transitionalMeta, err)
+	}
+	sessions, err := adapter.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+	visible := map[string]string{}
+	for _, session := range sessions {
+		visible[session.ID] = session.Path
+	}
+	if visible["main-thread"] != mainSession || visible["legacy-main"] != legacySession {
+		t.Fatalf("visible sessions = %#v", visible)
+	}
+}
+
+func TestSessionMetaPayloadDetectsSubagentFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload sessionMetaPayload
+		want    bool
+	}{
+		{name: "thread source", payload: sessionMetaPayload{ThreadSource: "subagent"}, want: true},
+		{name: "legacy object", payload: sessionMetaPayload{Source: json.RawMessage(`{"subagent":{"thread_spawn":{}}}`)}, want: true},
+		{name: "legacy scalar", payload: sessionMetaPayload{Source: json.RawMessage(`{"subagent":"memory_consolidation"}`)}, want: true},
+		{name: "null subagent", payload: sessionMetaPayload{Source: json.RawMessage(`{"subagent":null}`)}, want: false},
+		{name: "top level source", payload: sessionMetaPayload{Source: json.RawMessage(`"vscode"`)}, want: false},
+		{name: "unknown object", payload: sessionMetaPayload{Source: json.RawMessage(`{"other":"user"}`)}, want: false},
+		{name: "malformed source", payload: sessionMetaPayload{Source: json.RawMessage(`{`)}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.payload.isSubagent(); got != tt.want {
+				t.Fatalf("isSubagent() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -165,6 +553,70 @@ func output(ts, callID, text string) map[string]any {
 			"output":  text,
 		},
 	}
+}
+
+func customCall(ts, id, callID, name string, input any) map[string]any {
+	return map[string]any{
+		"timestamp": ts,
+		"type":      "response_item",
+		"payload": map[string]any{
+			"type":    "custom_tool_call",
+			"id":      id,
+			"name":    name,
+			"input":   input,
+			"call_id": callID,
+		},
+	}
+}
+
+func customOutput(ts, callID string, value any) map[string]any {
+	return map[string]any{
+		"timestamp": ts,
+		"type":      "response_item",
+		"payload": map[string]any{
+			"type":    "custom_tool_call_output",
+			"call_id": callID,
+			"output":  value,
+		},
+	}
+}
+
+func userMessage(ts, text string) map[string]any {
+	return map[string]any{
+		"timestamp": ts,
+		"type":      "response_item",
+		"payload": map[string]any{
+			"type":    "message",
+			"role":    "user",
+			"content": []any{map[string]any{"type": "input_text", "text": text}},
+		},
+	}
+}
+
+func patchApplyEnd(ts, callID string, success *bool, changes map[string]string) map[string]any {
+	payloadChanges := make(map[string]any, len(changes))
+	for path, changeType := range changes {
+		payloadChanges[path] = map[string]any{"type": changeType}
+	}
+	return map[string]any{
+		"timestamp": ts,
+		"type":      "event_msg",
+		"payload": map[string]any{
+			"type":    "patch_apply_end",
+			"call_id": callID,
+			"success": success,
+			"changes": payloadChanges,
+		},
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
 func writeJSONL(t *testing.T, path string, values ...any) {

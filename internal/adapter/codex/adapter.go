@@ -64,7 +64,7 @@ func (a Adapter) ListSessions() ([]model.SessionMeta, error) {
 			return nil
 		}
 		meta, err := a.Summarize(path)
-		if err == nil {
+		if err == nil && !meta.Auxiliary {
 			metas = append(metas, meta)
 		}
 		return nil
@@ -88,6 +88,8 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	meta := model.SessionMeta{Key: adapter.SessionKey(a.Harness(), path), ID: id, Harness: a.Harness(), Path: path}
 	recognized := false
+	sawSessionMeta := false
+	seenCalls := map[string]bool{}
 	err = adapter.ReadJSONLines(f, func(data []byte) {
 		var line rawLine
 		if json.Unmarshal(data, &line) != nil {
@@ -104,7 +106,12 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 			recognized = true
 			var payload sessionMetaPayload
 			if json.Unmarshal(line.Payload, &payload) == nil {
-				applySessionMeta(&meta, payload)
+				firstSessionMeta := !sawSessionMeta
+				if !sawSessionMeta {
+					sawSessionMeta = true
+					meta.Auxiliary = payload.isSubagent()
+				}
+				applySessionMeta(&meta, payload, firstSessionMeta)
 			}
 		case "turn_context":
 			recognized = true
@@ -119,9 +126,12 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 			}
 		case "response_item":
 			recognized = true
-			var payload responseItemPayload
-			if json.Unmarshal(line.Payload, &payload) == nil && payload.Type == "function_call" {
-				meta.EventCount++
+			var payload responseItemHeader
+			if json.Unmarshal(line.Payload, &payload) == nil {
+				if callID, ok := canonicalCallID(payload.Type, payload.ID, payload.CallID, payload.Name); ok && !seenCalls[callID] {
+					seenCalls[callID] = true
+					meta.EventCount++
+				}
 			}
 		case "event_msg":
 			recognized = true
@@ -166,8 +176,12 @@ func (a Adapter) Parse(path string) (*model.Trace, error) {
 	}
 
 	recognized := false
-	pending := map[string]adapter.ToolCall{}
-	pendingOrder := []string{}
+	sawSessionMeta := false
+	calls := map[string]adapter.ToolCall{}
+	callOrder := []string{}
+	results := map[string]adapter.ToolResult{}
+	directPatches := map[string]bool{}
+	patchResults := map[string]patchApplyEndPayload{}
 	err = adapter.ReadJSONLines(f, func(data []byte) {
 		var line rawLine
 		if json.Unmarshal(data, &line) != nil {
@@ -179,7 +193,9 @@ func (a Adapter) Parse(path string) (*model.Trace, error) {
 			recognized = true
 			var payload sessionMetaPayload
 			if json.Unmarshal(line.Payload, &payload) == nil {
-				applyTraceSessionMeta(trace, payload)
+				firstSessionMeta := !sawSessionMeta
+				sawSessionMeta = true
+				applyTraceSessionMeta(trace, payload, firstSessionMeta)
 			}
 		case "turn_context":
 			recognized = true
@@ -198,49 +214,47 @@ func (a Adapter) Parse(path string) (*model.Trace, error) {
 			if json.Unmarshal(line.Payload, &payload) != nil {
 				return
 			}
-			switch payload.Type {
-			case "function_call":
-				callID := payload.CallID
-				if callID == "" {
-					callID = payload.ID
-				}
-				call := adapter.ToolCall{
-					ID:        callID,
-					Name:      payload.Name,
-					Input:     parseArguments(payload.Arguments),
-					Timestamp: line.Timestamp,
-				}
-				if call.Name == "" || call.ID == "" {
+			if call, source, ok := decodeCall(payload, line.Timestamp); ok {
+				if _, exists := calls[call.ID]; exists {
 					return
 				}
-				if _, exists := pending[call.ID]; !exists {
-					pendingOrder = append(pendingOrder, call.ID)
-				}
-				pending[call.ID] = call
-			case "function_call_output":
-				call, ok := pending[payload.CallID]
-				if !ok {
+				calls[call.ID] = call
+				callOrder = append(callOrder, call.ID)
+				directPatches[call.ID] = source == "custom_tool_call" && call.Name == "apply_patch"
+				return
+			}
+			if callID, result, ok := decodeOutput(payload); ok {
+				if _, exists := calls[callID]; !exists {
 					return
 				}
-				delete(pending, payload.CallID)
-				output := adapter.ContentToString(payload.Output)
-				event := adapter.BuildEvent(trace, call, adapter.ToolResult{
-					Content: output,
-					IsError: commandOutputFailed(output),
-				})
-				trace.Events = append(trace.Events, event)
-			case "message":
+				if _, exists := results[callID]; exists {
+					return
+				}
+				results[callID] = result
+				return
+			}
+			if payload.Type == "message" {
 				if payload.Role == "user" && payload.Content.HasText() {
-					trace.Marks = append(trace.Marks, model.Mark{Seq: len(trace.Events), Type: "user-message"})
+					trace.Marks = append(trace.Marks, model.Mark{Seq: len(callOrder), Type: "user-message"})
 				}
 			}
 		case "message":
 			recognized = true
 			if line.Role == "user" && line.Content.HasText() {
-				trace.Marks = append(trace.Marks, model.Mark{Seq: len(trace.Events), Type: "user-message"})
+				trace.Marks = append(trace.Marks, model.Mark{Seq: len(callOrder), Type: "user-message"})
 			}
 		case "event_msg":
 			recognized = true
+			var payload patchApplyEndPayload
+			if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "patch_apply_end" || payload.CallID == "" {
+				return
+			}
+			if !directPatches[payload.CallID] {
+				return
+			}
+			if _, exists := patchResults[payload.CallID]; !exists {
+				patchResults[payload.CallID] = payload
+			}
 		case "":
 			if line.ID != "" {
 				recognized = true
@@ -248,16 +262,25 @@ func (a Adapter) Parse(path string) (*model.Trace, error) {
 			}
 		}
 	})
-	for _, id := range pendingOrder {
-		if call, ok := pending[id]; ok {
-			trace.Events = append(trace.Events, adapter.BuildEvent(trace, call, adapter.ToolResult{}))
+	for _, id := range callOrder {
+		call := calls[id]
+		result := results[id]
+		if patchResult, ok := patchResults[id]; ok {
+			call.Input = applyPatchChanges(call.Input, patchResult.Changes)
+			if patchResult.Success != nil {
+				result.IsError = !*patchResult.Success
+			}
 		}
+		trace.Events = append(trace.Events, adapter.BuildEvent(trace, call, result))
 	}
 	for i := range trace.Events {
 		trace.Events[i].Seq = i
 	}
 	if trace.Session.Title == "" {
 		trace.Session.Title = a.titleFor(trace.Session.ID)
+	}
+	if trace.Session.Title == "" {
+		trace.Session.Title = filepath.Base(path)
 	}
 	trace.Session.EventCount = len(trace.Events)
 	trace.Stats = model.ComputeStats(trace, 0)
@@ -277,14 +300,33 @@ type rawLine struct {
 }
 
 type sessionMetaPayload struct {
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
-	Timestamp string `json:"timestamp"`
-	Cwd       string `json:"cwd"`
-	Git       struct {
+	ID           string          `json:"id"`
+	SessionID    string          `json:"session_id"`
+	Timestamp    string          `json:"timestamp"`
+	Cwd          string          `json:"cwd"`
+	ThreadSource string          `json:"thread_source"`
+	Source       json.RawMessage `json:"source"`
+	Git          struct {
 		Branch     string `json:"branch"`
 		CommitHash string `json:"commit_hash"`
 	} `json:"git"`
+}
+
+func (p sessionMetaPayload) isSubagent() bool {
+	if p.ThreadSource == "subagent" {
+		return true
+	}
+	if len(p.Source) == 0 {
+		return false
+	}
+	var source struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(p.Source, &source) != nil {
+		return false
+	}
+	subagent := strings.TrimSpace(string(source.Subagent))
+	return subagent != "" && subagent != "null"
 }
 
 type turnContextPayload struct {
@@ -296,11 +338,33 @@ type responseItemPayload struct {
 	Type      string           `json:"type"`
 	ID        string           `json:"id"`
 	Name      string           `json:"name"`
-	Arguments string           `json:"arguments"`
+	Arguments json.RawMessage  `json:"arguments"`
+	Input     json.RawMessage  `json:"input"`
 	CallID    string           `json:"call_id"`
 	Output    any              `json:"output"`
 	Role      string           `json:"role"`
 	Content   codexContentList `json:"content"`
+}
+
+// responseItemHeader keeps session-list scans allocation-light. Summarize only
+// needs call identity, so decoding large arguments, outputs, and patch bodies
+// here would add substantial cold-start cost without changing the count.
+type responseItemHeader struct {
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	CallID string `json:"call_id"`
+}
+
+type patchApplyEndPayload struct {
+	Type    string                      `json:"type"`
+	CallID  string                      `json:"call_id"`
+	Success *bool                       `json:"success"`
+	Changes map[string]patchApplyChange `json:"changes"`
+}
+
+type patchApplyChange struct {
+	Type string `json:"type"`
 }
 
 type codexContentList struct {
@@ -341,11 +405,13 @@ type codexContentItem struct {
 	Text string `json:"text"`
 }
 
-func applySessionMeta(meta *model.SessionMeta, payload sessionMetaPayload) {
-	if payload.ID != "" {
-		meta.ID = payload.ID
-	} else if payload.SessionID != "" {
-		meta.ID = payload.SessionID
+func applySessionMeta(meta *model.SessionMeta, payload sessionMetaPayload, setIdentity bool) {
+	if setIdentity {
+		if payload.ID != "" {
+			meta.ID = payload.ID
+		} else if payload.SessionID != "" {
+			meta.ID = payload.SessionID
+		}
 	}
 	if payload.Cwd != "" && meta.Cwd == "" {
 		meta.Cwd = payload.Cwd
@@ -363,16 +429,18 @@ func applySessionMeta(meta *model.SessionMeta, payload sessionMetaPayload) {
 	}
 }
 
-func applyTraceSessionMeta(trace *model.Trace, payload sessionMetaPayload) {
-	if payload.ID != "" {
-		trace.Session.ID = payload.ID
-	} else if payload.SessionID != "" {
-		trace.Session.ID = payload.SessionID
+func applyTraceSessionMeta(trace *model.Trace, payload sessionMetaPayload, setIdentity bool) {
+	if setIdentity {
+		if payload.ID != "" {
+			trace.Session.ID = payload.ID
+		} else if payload.SessionID != "" {
+			trace.Session.ID = payload.SessionID
+		}
 	}
 	if payload.Cwd != "" && trace.Session.Cwd == "" {
 		trace.Session.Cwd = payload.Cwd
 	}
-	if payload.Git.CommitHash != "" {
+	if payload.Git.CommitHash != "" && trace.Session.Commit == "" {
 		trace.Session.Commit = payload.Git.CommitHash
 	}
 	if payload.Timestamp != "" && trace.Session.StartedAt == "" {
@@ -390,32 +458,167 @@ func applyLineTime(trace *model.Trace, ts string) {
 	trace.Session.EndedAt = ts
 }
 
-func parseArguments(raw string) map[string]any {
-	raw = strings.TrimSpace(raw)
+func decodeCall(payload responseItemPayload, timestamp string) (adapter.ToolCall, string, bool) {
+	callID, ok := canonicalCallID(payload.Type, payload.ID, payload.CallID, payload.Name)
+	if !ok {
+		return adapter.ToolCall{}, "", false
+	}
+	var raw json.RawMessage
+	switch payload.Type {
+	case "function_call":
+		raw = payload.Arguments
+	case "custom_tool_call":
+		raw = payload.Input
+	}
+	return adapter.ToolCall{
+		ID:        callID,
+		Name:      payload.Name,
+		Input:     parseInput(raw),
+		Timestamp: timestamp,
+	}, payload.Type, true
+}
+
+func canonicalCallID(callType, id, callID, name string) (string, bool) {
+	switch callType {
+	case "function_call", "custom_tool_call":
+	default:
+		return "", false
+	}
+	if callID == "" {
+		callID = id
+	}
+	return callID, callID != "" && name != ""
+}
+
+func decodeOutput(payload responseItemPayload) (string, adapter.ToolResult, bool) {
+	switch payload.Type {
+	case "function_call_output", "custom_tool_call_output":
+	default:
+		return "", adapter.ToolResult{}, false
+	}
+	if payload.CallID == "" {
+		return "", adapter.ToolResult{}, false
+	}
+	output := adapter.ContentToString(payload.Output)
+	return payload.CallID, adapter.ToolResult{
+		Content: output,
+		IsError: commandOutputFailed(output),
+	}, true
+}
+
+func parseInput(raw json.RawMessage) map[string]any {
 	input := map[string]any{}
-	if raw == "" {
+	if len(raw) == 0 || string(raw) == "null" {
 		return input
 	}
-	if json.Unmarshal([]byte(raw), &input) == nil {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		input["_raw"] = string(raw)
 		return input
 	}
-	var text string
-	if json.Unmarshal([]byte(raw), &text) == nil {
-		input["_raw"] = text
-	} else {
-		input["_raw"] = raw
+	switch value := value.(type) {
+	case map[string]any:
+		return value
+	case string:
+		return parseInputText(value)
+	default:
+		encoded, _ := json.Marshal(value)
+		input["_raw"] = string(encoded)
+		return input
 	}
+}
+
+func parseInputText(text string) map[string]any {
+	input := map[string]any{}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return input
+	}
+	if json.Unmarshal([]byte(trimmed), &input) == nil {
+		return input
+	}
+	var nested string
+	if json.Unmarshal([]byte(trimmed), &nested) == nil && nested != text {
+		return parseInputText(nested)
+	}
+	input["_raw"] = text
 	return input
 }
 
-var exitCodeRe = regexp.MustCompile(`Process exited with code ([0-9]+)`)
+func applyPatchChanges(input map[string]any, changes map[string]patchApplyChange) map[string]any {
+	if len(changes) == 0 {
+		return input
+	}
+	merged := make(map[string]any, len(input)+1)
+	for key, value := range input {
+		merged[key] = value
+	}
+	patch := ""
+	for _, key := range []string{"patch", "input", "_raw"} {
+		if value, ok := input[key].(string); ok {
+			patch = value
+			break
+		}
+	}
+	if patch != "" && !strings.HasSuffix(patch, "\n") {
+		patch += "\n"
+	}
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		operation := "Update"
+		switch strings.ToLower(changes[path].Type) {
+		case "add":
+			operation = "Add"
+		case "delete":
+			operation = "Delete"
+		}
+		patch += fmt.Sprintf("*** %s File: %s\n", operation, path)
+	}
+	merged["patch"] = patch
+	return merged
+}
+
+var exitCodeRe = regexp.MustCompile(`(?im)^(?:Process exited with code|Exit code:)\s*([0-9]+)\s*$`)
 
 func commandOutputFailed(output string) bool {
-	match := exitCodeRe.FindStringSubmatch(output)
-	if len(match) != 2 {
-		return false
+	trimmed := strings.TrimSpace(output)
+	var envelope struct {
+		ExitCode *int `json:"exit_code"`
+		Metadata struct {
+			ExitCode *int `json:"exit_code"`
+		} `json:"metadata"`
 	}
-	return match[1] != "0"
+	if json.Unmarshal([]byte(trimmed), &envelope) == nil {
+		if envelope.ExitCode != nil {
+			return *envelope.ExitCode != 0
+		}
+		if envelope.Metadata.ExitCode != nil {
+			return *envelope.Metadata.ExitCode != 0
+		}
+	}
+	firstLine := trimmed
+	if newline := strings.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	}
+	status := strings.ToLower(strings.TrimSpace(firstLine))
+	switch {
+	case strings.HasPrefix(status, "script completed"), strings.HasPrefix(status, "script running"):
+		return false
+	case strings.HasPrefix(status, "script failed"):
+		return true
+	}
+	header := trimmed
+	for _, marker := range []string{"\nOutput:\n", "\nFinal output:\n"} {
+		if index := strings.Index(header, marker); index >= 0 {
+			header = header[:index]
+		}
+	}
+	match := exitCodeRe.FindStringSubmatch(header)
+	return len(match) == 2 && match[1] != "0"
 }
 
 func (a Adapter) titleFor(id string) string {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { describeError, getCityMap, getTrace, listSessions } from "./api/client";
+import { describeError, getSessionSnapshot, listSessions } from "./api/client";
 import { PlaybackEngine } from "./playback/reducer";
 import { CityScene } from "./scene/CityScene";
 import { TreeScene } from "./scene/TreeScene";
@@ -36,12 +36,48 @@ export default function App() {
     setHarnessFilter
   } = useAppStore();
   const urlSessionConsumed = useRef(false);
+  const scanGeneration = useRef(0);
+  const loadGeneration = useRef(0);
+  const manualRefreshInFlight = useRef(false);
+  const pendingLoads = useRef(0);
+  const activeSessionKeyRef = useRef(activeSessionKey);
+  activeSessionKeyRef.current = activeSessionKey;
 
-  const refresh = useCallback(async () => {
+  const beginLoading = useCallback(() => {
+    pendingLoads.current++;
     setLoading(true);
+  }, [setLoading]);
+
+  const endLoading = useCallback(() => {
+    pendingLoads.current = Math.max(0, pendingLoads.current - 1);
+    if (pendingLoads.current === 0) setLoading(false);
+  }, [setLoading]);
+
+  const loadSession = useCallback(async (key: string) => {
+    const generation = ++loadGeneration.current;
+    beginLoading();
     setError(undefined);
     try {
-      const data = await listSessions();
+      const { trace: nextTrace, city: nextCity } = await getSessionSnapshot(key);
+      if (generation !== loadGeneration.current || activeSessionKeyRef.current !== key) return;
+      setData(nextTrace, nextCity);
+      setSelectedPath(undefined);
+    } catch (err) {
+      if (generation === loadGeneration.current && activeSessionKeyRef.current === key) {
+        setError(describeError(err, "loading the session"));
+      }
+    } finally {
+      endLoading();
+    }
+  }, [beginLoading, endLoading, setData, setError, setSelectedPath]);
+
+  const scan = useCallback(async (fresh: boolean) => {
+    const generation = ++scanGeneration.current;
+    beginLoading();
+    setError(undefined);
+    try {
+      const data = await listSessions(fresh);
+      if (generation !== scanGeneration.current) return;
       setSessions(data);
       let preferred: string | undefined;
       if (!urlSessionConsumed.current) {
@@ -59,52 +95,48 @@ export default function App() {
         }
       }
       // a session can disappear between scans; fall back instead of pinning a dead key
+      const currentActiveKey = activeSessionKeyRef.current;
       const stillListed =
-        activeSessionKey !== undefined && data.some((session) => session.key === activeSessionKey);
+        currentActiveKey !== undefined && data.some((session) => session.key === currentActiveKey);
       // prefer a session the rail will actually show; if the filters hide
       // everything, the newest session still beats a blank stage
       const fallback = (
         data.find((session) => sessionVisible(session, { hideEmpty, harness: harnessFilter })) ?? data[0]
       )?.key;
-      const next = preferred ?? (stillListed ? activeSessionKey : fallback);
-      if (next && next !== activeSessionKey) {
+      const next = preferred ?? (stillListed ? currentActiveKey : fallback);
+      if (next !== currentActiveKey) {
+        activeSessionKeyRef.current = next;
+        if (!next) loadGeneration.current++;
         setActiveSession(next);
       }
+      if (next) await loadSession(next);
     } catch (err) {
-      setError(describeError(err, "scanning sessions"));
+      if (generation === scanGeneration.current) {
+        setError(describeError(err, "scanning sessions"));
+      }
     } finally {
-      setLoading(false);
+      endLoading();
     }
-  }, [activeSessionKey, harnessFilter, hideEmpty, setActiveSession, setError, setLoading, setSessions]);
+  }, [beginLoading, endLoading, harnessFilter, hideEmpty, loadSession, setActiveSession, setError, setSessions]);
+
+  const refresh = useCallback(() => {
+    if (manualRefreshInFlight.current) return;
+    manualRefreshInFlight.current = true;
+    void scan(true).finally(() => {
+      manualRefreshInFlight.current = false;
+    });
+  }, [scan]);
+
+  const selectSession = useCallback((key: string) => {
+    activeSessionKeyRef.current = key;
+    setActiveSession(key);
+    void loadSession(key);
+  }, [loadSession, setActiveSession]);
 
   useEffect(() => {
-    void refresh();
+    void scan(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (!activeSessionKey) return;
-    // rapid session switches: a slow response for the previous session must
-    // not overwrite the newer one, nor clear its loading state early
-    let stale = false;
-    setLoading(true);
-    setError(undefined);
-    Promise.all([getTrace(activeSessionKey), getCityMap(activeSessionKey)])
-      .then(([nextTrace, nextCity]) => {
-        if (stale) return;
-        setData(nextTrace, nextCity);
-        setSelectedPath(undefined);
-      })
-      .catch((err) => {
-        if (!stale) setError(describeError(err, "loading the session"));
-      })
-      .finally(() => {
-        if (!stale) setLoading(false);
-      });
-    return () => {
-      stale = true;
-    };
-  }, [activeSessionKey, setData, setError, setLoading, setSelectedPath]);
 
   const engine = useMemo(() => new PlaybackEngine(trace, city), [trace, city]);
   const playback = useMemo(() => engine.snapshotAt(currentSeq), [engine, currentSeq]);
@@ -121,7 +153,7 @@ export default function App() {
         loading={loading}
         hideEmpty={hideEmpty}
         harnessFilter={harnessFilter}
-        onSelect={setActiveSession}
+        onSelect={selectSession}
         onRefresh={refresh}
         onHideEmptyChange={setHideEmpty}
         onHarnessFilterChange={setHarnessFilter}

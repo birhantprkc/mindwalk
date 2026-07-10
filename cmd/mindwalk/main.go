@@ -49,10 +49,11 @@ func serve(args []string) error {
 	claudeDir := fs.String("claude-dir", claudecode.DefaultDir(), "Claude Code projects directory")
 	codexDir := fs.String("codex-dir", codex.DefaultDir(), "Codex sessions directory")
 	dev := fs.Bool("dev", false, "prefer web/dist from the working tree")
+	noOpen := fs.Bool("no-open", false, "serve without opening a browser")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return server.New(server.Config{Port: *port, ClaudeDir: *claudeDir, CodexDir: *codexDir, Dev: *dev}).Start(true)
+	return server.New(server.Config{Port: *port, ClaudeDir: *claudeDir, CodexDir: *codexDir, Dev: *dev}).Start(!*noOpen)
 }
 
 func open(args []string) error {
@@ -60,17 +61,18 @@ func open(args []string) error {
 	port := fs.Int("port", 0, "port to bind on 127.0.0.1")
 	claudeDir := fs.String("claude-dir", claudecode.DefaultDir(), "Claude Code projects directory")
 	codexDir := fs.String("codex-dir", codex.DefaultDir(), "Codex sessions directory")
+	noOpen := fs.Bool("no-open", false, "serve without opening a browser")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: mindwalk open <session.jsonl>")
+		return fmt.Errorf("usage: mindwalk open [--no-open] <session.jsonl>")
 	}
 	session, err := filepath.Abs(fs.Arg(0))
 	if err != nil {
 		return err
 	}
-	return server.New(server.Config{Port: *port, ClaudeDir: *claudeDir, CodexDir: *codexDir, OpenSession: session}).Start(true)
+	return server.New(server.Config{Port: *port, ClaudeDir: *claudeDir, CodexDir: *codexDir, OpenSession: session}).Start(!*noOpen)
 }
 
 func build(args []string) error {
@@ -158,8 +160,8 @@ func usage() {
 
 Usage:
   mindwalk                        serve on a random local port and open the UI
-  mindwalk serve [--port N] [--claude-dir DIR] [--codex-dir DIR]
-  mindwalk open <session.jsonl>   open a specific Claude Code or Codex session
+  mindwalk serve [--port N] [--no-open] [--claude-dir DIR] [--codex-dir DIR]
+  mindwalk open [--no-open] <session.jsonl> open a specific Claude Code or Codex session
   mindwalk build <repo> [-o out]  write citymap.json
   mindwalk trace <session> [-o out] write trace.json`)
 }

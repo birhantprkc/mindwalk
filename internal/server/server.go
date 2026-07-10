@@ -45,19 +45,27 @@ type Server struct {
 	scanMu    sync.Mutex
 	sessions  []model.SessionMeta
 	sessionAt time.Time
+	freshGen  uint64
 	traces    map[string]*model.Trace
 	maps      map[string]*model.CityMap
 	cacheAt   map[string]time.Time
 	cacheUsed map[string]time.Time
+	cacheFile map[string]fileFingerprint
 	inflight  map[string]*inflightLoad
 	summaries map[string]summaryCacheEntry
 }
 
 type inflightLoad struct {
-	done  chan struct{}
-	trace *model.Trace
-	city  *model.CityMap
-	err   error
+	done        chan struct{}
+	fingerprint fileFingerprint
+	trace       *model.Trace
+	city        *model.CityMap
+	err         error
+}
+
+type fileFingerprint struct {
+	size    int64
+	modTime time.Time
 }
 
 type summaryCacheEntry struct {
@@ -80,6 +88,7 @@ func New(cfg Config) *Server {
 		maps:      map[string]*model.CityMap{},
 		cacheAt:   map[string]time.Time{},
 		cacheUsed: map[string]time.Time{},
+		cacheFile: map[string]fileFingerprint{},
 		inflight:  map[string]*inflightLoad{},
 		summaries: map[string]summaryCacheEntry{},
 	}
@@ -119,7 +128,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sessions, err := s.listSessions()
+	sessions, err := s.listSessionsFresh(r.URL.Query().Get("fresh") == "1")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -135,6 +144,16 @@ func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 	}
 	selector, resource := parts[0], parts[1]
 	switch resource {
+	case "snapshot":
+		trace, city, err := s.traceAndMap(selector)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, struct {
+			Trace *model.Trace   `json:"trace"`
+			City  *model.CityMap `json:"city"`
+		}{Trace: trace, City: city})
 	case "trace":
 		trace, _, err := s.traceAndMap(selector)
 		if err != nil {
@@ -155,12 +174,23 @@ func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listSessions() ([]model.SessionMeta, error) {
+	return s.listSessionsFresh(false)
+}
+
+func (s *Server) listSessionsFresh(fresh bool) ([]model.SessionMeta, error) {
+	s.mu.Lock()
+	observedFreshGen := s.freshGen
+	s.mu.Unlock()
+	return s.listSessionsObserved(fresh, observedFreshGen)
+}
+
+func (s *Server) listSessionsObserved(fresh bool, observedFreshGen uint64) ([]model.SessionMeta, error) {
 	// scanMu serializes scans so callers arriving mid-scan wait for the
 	// in-flight result instead of duplicating the walk
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 	s.mu.Lock()
-	if s.sessions != nil && time.Since(s.sessionAt) < sessionListTTL {
+	if s.sessions != nil && ((!fresh && time.Since(s.sessionAt) < sessionListTTL) || (fresh && s.freshGen != observedFreshGen)) {
 		sessions := append([]model.SessionMeta(nil), s.sessions...)
 		s.mu.Unlock()
 		return sessions, nil
@@ -193,6 +223,9 @@ func (s *Server) listSessions() ([]model.SessionMeta, error) {
 	s.mu.Lock()
 	s.sessions = sessions
 	s.sessionAt = time.Now()
+	if fresh {
+		s.freshGen++
+	}
 	s.mu.Unlock()
 	return sessions, nil
 }
@@ -272,7 +305,7 @@ func (s *Server) scanSessions() ([]model.SessionMeta, error) {
 
 	sessions := make([]model.SessionMeta, 0, len(files))
 	for _, meta := range results {
-		if meta != nil {
+		if meta != nil && !meta.Auxiliary {
 			sessions = append(sessions, *meta)
 		}
 	}
@@ -344,45 +377,69 @@ func (s *Server) traceAndMap(selector string) (*model.Trace, *model.CityMap, err
 	if key == "" {
 		key = adapter.SessionKey(meta.Harness, meta.Path)
 	}
-	s.mu.Lock()
-	if trace := s.traces[key]; trace != nil {
-		if time.Since(s.cacheAt[key]) < traceCacheTTL {
-			city := s.maps[key]
-			s.cacheUsed[key] = time.Now()
+	for {
+		fingerprint, err := fingerprintFile(meta.Path)
+		if err != nil {
+			s.mu.Lock()
+			s.deleteTraceCacheLocked(key)
 			s.mu.Unlock()
-			return trace, city, nil
+			return nil, nil, err
 		}
-		s.deleteTraceCacheLocked(key)
-	}
-	if load := s.inflight[key]; load != nil {
-		done := load.done
+
+		s.mu.Lock()
+		if trace := s.traces[key]; trace != nil {
+			cachedFingerprint, versioned := s.cacheFile[key]
+			if versioned && cachedFingerprint.equal(fingerprint) && time.Since(s.cacheAt[key]) < traceCacheTTL {
+				city := s.maps[key]
+				s.cacheUsed[key] = time.Now()
+				s.mu.Unlock()
+				return trace, city, nil
+			}
+			s.deleteTraceCacheLocked(key)
+		}
+		if load := s.inflight[key]; load != nil {
+			done := load.done
+			shareSnapshot := fingerprint.equal(load.fingerprint)
+			s.mu.Unlock()
+			<-done
+
+			// Requests that observed the same source version must receive the
+			// same trace/city snapshot, even if the active file grows while the
+			// shared parse is running. A request that already observed a newer
+			// version retries after the older load completes.
+			if shareSnapshot {
+				return load.trace, load.city, load.err
+			}
+			continue
+		}
+		load := &inflightLoad{done: make(chan struct{}), fingerprint: fingerprint}
+		s.inflight[key] = load
 		s.mu.Unlock()
-		<-done
-		return load.trace, load.city, load.err
+
+		// Keep the pre-parse fingerprint. If the active session grows during
+		// parsing, the next request will see a mismatch and reload it instead
+		// of treating the partial snapshot as current.
+		trace, city, err := s.loadTraceAndMap(meta)
+
+		s.mu.Lock()
+		if err == nil {
+			s.traces[key] = trace
+			s.maps[key] = city
+			s.cacheFile[key] = fingerprint
+			now := time.Now()
+			s.cacheAt[key] = now
+			s.cacheUsed[key] = now
+			s.evictTraceCacheLocked()
+		}
+		load.trace = trace
+		load.city = city
+		load.err = err
+		delete(s.inflight, key)
+		close(load.done)
+		s.mu.Unlock()
+
+		return trace, city, err
 	}
-	load := &inflightLoad{done: make(chan struct{})}
-	s.inflight[key] = load
-	s.mu.Unlock()
-
-	trace, city, err := s.loadTraceAndMap(meta)
-
-	s.mu.Lock()
-	if err == nil {
-		s.traces[key] = trace
-		s.maps[key] = city
-		now := time.Now()
-		s.cacheAt[key] = now
-		s.cacheUsed[key] = now
-		s.evictTraceCacheLocked()
-	}
-	load.trace = trace
-	load.city = city
-	load.err = err
-	delete(s.inflight, key)
-	close(load.done)
-	s.mu.Unlock()
-
-	return trace, city, err
 }
 
 func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.CityMap, error) {
@@ -479,6 +536,19 @@ func (s *Server) deleteTraceCacheLocked(key string) {
 	delete(s.maps, key)
 	delete(s.cacheAt, key)
 	delete(s.cacheUsed, key)
+	delete(s.cacheFile, key)
+}
+
+func fingerprintFile(path string) (fileFingerprint, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileFingerprint{}, err
+	}
+	return fileFingerprint{size: info.Size(), modTime: info.ModTime()}, nil
+}
+
+func (f fileFingerprint) equal(other fileFingerprint) bool {
+	return f.size == other.size && f.modTime.Equal(other.modTime)
 }
 
 func (s *Server) evictTraceCacheLocked() {

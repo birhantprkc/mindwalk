@@ -10,14 +10,13 @@ description: Build, launch, and drive the mindwalk web UI end-to-end for verific
 ```sh
 npm --prefix web run build                  # tsc -b && vite build → web/dist
 go build -o bin/mindwalk ./cmd/mindwalk
-bin/mindwalk serve --dev --port <PORT>      # --dev serves web/dist from the working tree
+bin/mindwalk serve --no-open --dev --port <PORT> # --dev serves web/dist from the working tree
 ```
 
 Gotchas:
 
-- `serve` always opens the default browser via `open`. To suppress, prepend a
-  stub to PATH: `printf '#!/bin/sh\nexit 0\n' > stub/open && chmod +x stub/open`
-  then `PATH=stub:$PATH bin/mindwalk serve ...`.
+- Always pass `--no-open` during automated verification so repeated server
+  starts do not create tabs or steal focus from the user's current work.
 - Port 8765 is the vite-proxy convention and is often already taken by a dev
   server; pick another port and check the log for `bind: address already in use`.
 - Sessions come from `~/.claude/projects` — this machine has real data, no

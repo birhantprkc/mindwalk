@@ -120,4 +120,5 @@ type SessionMeta struct {
 	StartedAt  string `json:"startedAt,omitempty"`
 	EndedAt    string `json:"endedAt,omitempty"`
 	EventCount int    `json:"eventCount"`
+	Auxiliary  bool   `json:"-"`
 }

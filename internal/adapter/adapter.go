@@ -130,12 +130,23 @@ func actionFor(tool string, input map[string]any, result string) string {
 		return "edit"
 	case "Grep", "Glob", "LS", "view_image":
 		return "search"
-	case "Bash", "exec_command", "write_stdin", "js":
-		command := firstString(input, "command", "cmd", "code", "chars")
+	case "Bash", "exec_command", "write_stdin", "js", "js_repl":
+		command := firstString(input, "command", "cmd", "code", "chars", "script", "_raw")
 		if verifyCommand(command) {
 			return "verify"
 		}
 		return "exec"
+	case "exec":
+		commands := execCommands(input)
+		if len(commands) == 0 || !execHasOnlyStaticCommands(input, len(commands)) {
+			return "exec"
+		}
+		for _, command := range commands {
+			if !verifyCommand(command.command) {
+				return "exec"
+			}
+		}
+		return "verify"
 	default:
 		_ = result
 		return "other"
@@ -217,6 +228,24 @@ func targetsFor(cwd, tool string, input map[string]any, result string) ([]model.
 		for _, hit := range parsePathHits(result) {
 			add(hit.path, "hit", true, hit.lines, base)
 		}
+	case "exec":
+		for _, command := range execCommands(input) {
+			for _, path := range extractCommandPaths(command.command) {
+				add(path, "hit", true, nil, command.workdir)
+			}
+			for _, path := range extractPaths(command.command) {
+				add(path, "hit", true, nil, command.workdir)
+			}
+		}
+		// The aggregate result does not retain which inner command produced each
+		// line, so resolve result-only paths against the session cwd rather than
+		// guessing a workdir.
+		for _, path := range extractPaths(result) {
+			add(path, "hit", true, nil, "")
+		}
+		for _, hit := range parsePathHits(result) {
+			add(hit.path, "hit", true, hit.lines, "")
+		}
 	case "apply_patch":
 		patch := firstString(input, "patch", "input", "_raw")
 		for _, path := range parsePatchPaths(patch) {
@@ -226,8 +255,8 @@ func targetsFor(cwd, tool string, input map[string]any, result string) ([]model.
 		if path := firstString(input, "path"); path != "" {
 			add(path, "read", false, nil, "")
 		}
-	case "js":
-		code := firstString(input, "code", "script")
+	case "js", "js_repl":
+		code := firstString(input, "code", "script", "_raw")
 		for _, path := range extractPaths(code + "\n" + result) {
 			add(path, "hit", true, nil, "")
 		}
@@ -242,6 +271,221 @@ func firstString(input map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+type execCommand struct {
+	command string
+	workdir string
+}
+
+// execStringFieldRe recognizes only JSON-compatible double-quoted string
+// literals assigned to cmd or workdir. It intentionally does not attempt to
+// parse arbitrary JavaScript expressions.
+var execStringFieldRe = regexp.MustCompile(`(?:^|[[:space:],{])(?:"(cmd|workdir)"|(cmd|workdir))\s*:\s*("(?:\\.|[^"\\])*")`)
+
+func execSource(input map[string]any) string {
+	for _, key := range []string{"_raw", "code", "script"} {
+		if candidate, ok := input[key].(string); ok && candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func execHasOnlyStaticCommands(input map[string]any, commandCount int) bool {
+	source := execSource(input)
+	if source == "" {
+		return firstString(input, "cmd", "command") != ""
+	}
+	tools := execToolNames(source)
+	if len(tools) != commandCount {
+		return false
+	}
+	for _, tool := range tools {
+		if tool != "exec_command" {
+			return false
+		}
+	}
+	return true
+}
+
+func execCommands(input map[string]any) []execCommand {
+	source := execSource(input)
+	if source == "" {
+		if command := firstString(input, "cmd", "command"); command != "" {
+			return []execCommand{{command: command, workdir: firstString(input, "workdir")}}
+		}
+		return nil
+	}
+
+	arguments := execCommandArguments(source)
+	commands := make([]execCommand, 0, len(arguments))
+	for _, argument := range arguments {
+		if command, ok := parseStaticExecCommand(argument); ok {
+			commands = append(commands, command)
+		}
+	}
+	return commands
+}
+
+func parseStaticExecCommand(argument string) (execCommand, bool) {
+	var command execCommand
+	ambiguousWorkdir := false
+	for _, match := range execStringFieldRe.FindAllStringSubmatchIndex(argument, -1) {
+		keyStart, keyEnd := match[2], match[3]
+		if keyStart < 0 {
+			keyStart, keyEnd = match[4], match[5]
+		}
+		key := argument[keyStart:keyEnd]
+
+		var value string
+		if err := json.Unmarshal([]byte(argument[match[6]:match[7]]), &value); err != nil {
+			continue
+		}
+
+		if key == "cmd" {
+			if command.command != "" {
+				return execCommand{}, false
+			}
+			command.command = value
+			continue
+		}
+
+		if command.workdir != "" {
+			ambiguousWorkdir = true
+			command.workdir = ""
+			continue
+		}
+		if !ambiguousWorkdir {
+			command.workdir = value
+		}
+	}
+	return command, command.command != ""
+}
+
+func execCommandArguments(source string) []string {
+	const call = "tools.exec_command"
+	var arguments []string
+	for i := 0; i < len(source); {
+		if next, ok := skipJSIgnored(source, i); ok {
+			i = next
+			continue
+		}
+		if !strings.HasPrefix(source[i:], call) || (i > 0 && isJSIdentifierByte(source[i-1])) {
+			i++
+			continue
+		}
+		open := i + len(call)
+		for open < len(source) && isJSSpace(source[open]) {
+			open++
+		}
+		if open >= len(source) || source[open] != '(' {
+			i++
+			continue
+		}
+		close, ok := matchingJSParen(source, open)
+		if !ok {
+			break
+		}
+		arguments = append(arguments, source[open+1:close])
+		i = close + 1
+	}
+	return arguments
+}
+
+func execToolNames(source string) []string {
+	const prefix = "tools."
+	var names []string
+	for i := 0; i < len(source); {
+		if next, ok := skipJSIgnored(source, i); ok {
+			i = next
+			continue
+		}
+		if !strings.HasPrefix(source[i:], prefix) || (i > 0 && isJSIdentifierByte(source[i-1])) {
+			i++
+			continue
+		}
+		nameStart := i + len(prefix)
+		nameEnd := nameStart
+		for nameEnd < len(source) && isJSIdentifierByte(source[nameEnd]) {
+			nameEnd++
+		}
+		open := nameEnd
+		for open < len(source) && isJSSpace(source[open]) {
+			open++
+		}
+		if nameEnd == nameStart || open >= len(source) || source[open] != '(' {
+			i++
+			continue
+		}
+		names = append(names, source[nameStart:nameEnd])
+		i = open + 1
+	}
+	return names
+}
+
+func matchingJSParen(source string, open int) (int, bool) {
+	depth := 1
+	for i := open + 1; i < len(source); {
+		if next, ok := skipJSIgnored(source, i); ok {
+			i = next
+			continue
+		}
+		switch source[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+		i++
+	}
+	return 0, false
+}
+
+func skipJSIgnored(source string, start int) (int, bool) {
+	if start >= len(source) {
+		return start, false
+	}
+	if quote := source[start]; quote == '\'' || quote == '"' || quote == '`' {
+		for i := start + 1; i < len(source); i++ {
+			if source[i] == '\\' {
+				i++
+				continue
+			}
+			if source[i] == quote {
+				return i + 1, true
+			}
+		}
+		return len(source), true
+	}
+	if source[start] != '/' || start+1 >= len(source) {
+		return start, false
+	}
+	switch source[start+1] {
+	case '/':
+		if end := strings.IndexByte(source[start+2:], '\n'); end >= 0 {
+			return start + 2 + end + 1, true
+		}
+		return len(source), true
+	case '*':
+		if end := strings.Index(source[start+2:], "*/"); end >= 0 {
+			return start + 2 + end + 2, true
+		}
+		return len(source), true
+	default:
+		return start, false
+	}
+}
+
+func isJSSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+func isJSIdentifierByte(b byte) bool {
+	return b == '_' || b == '$' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 func repoPathExists(cwd, rel string) bool {

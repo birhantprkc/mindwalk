@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cosmtrek/mindwalk/internal/adapter"
@@ -49,6 +50,22 @@ func TestTraceStillLoadsWhenSessionCwdIsMissing(t *testing.T) {
 	}
 	if len(city.Files) != 0 || city.Repo.Root == "" || city.Layout.Algorithm != "unavailable" {
 		t.Fatalf("city = %#v", city)
+	}
+
+	snapshotResp := httptest.NewRecorder()
+	s.handleSessionResource(snapshotResp, httptest.NewRequest(http.MethodGet, "/api/sessions/missingcwd/snapshot", nil))
+	if snapshotResp.Code != http.StatusOK {
+		t.Fatalf("snapshot status = %d body=%s", snapshotResp.Code, snapshotResp.Body.String())
+	}
+	var snapshot struct {
+		Trace model.Trace   `json:"trace"`
+		City  model.CityMap `json:"city"`
+	}
+	if err := json.Unmarshal(snapshotResp.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Trace.Events) != 1 || snapshot.City.Repo.Root != city.Repo.Root {
+		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
 
@@ -117,6 +134,155 @@ func TestDuplicateSessionIDsUseDistinctKeysAndCaches(t *testing.T) {
 	if _, err := s.findSession("shared-id"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("duplicate legacy ID error = %v", err)
 	}
+}
+
+func TestTraceCacheReloadsWhenActiveSessionGrows(t *testing.T) {
+	claudeDir := t.TempDir()
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "a.go"), []byte("package demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "b.go"), []byte("package demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(claudeDir, "growing.jsonl")
+	writeServerSession(t, session,
+		`{"type":"user","timestamp":"2026-07-09T00:00:00Z","sessionId":"growing","cwd":`+quoteJSON(repoRoot)+`,"message":{"role":"user","content":"hello"}}`,
+		`{"type":"assistant","timestamp":"2026-07-09T00:00:01Z","sessionId":"growing","cwd":`+quoteJSON(repoRoot)+`,"message":{"role":"assistant","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":`+quoteJSON(filepath.Join(repoRoot, "a.go"))+`}}]}}`,
+		`{"type":"user","timestamp":"2026-07-09T00:00:02Z","sessionId":"growing","cwd":`+quoteJSON(repoRoot)+`,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r1","content":"ok","is_error":false}]}}`,
+	)
+
+	s := New(Config{ClaudeDir: claudeDir, CodexDir: filepath.Join(t.TempDir(), "codex")})
+	firstTrace, firstCity, err := s.traceAndMap("growing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstTrace.Events) != 1 {
+		t.Fatalf("initial events = %d, want 1", len(firstTrace.Events))
+	}
+
+	appendServerSession(t, session,
+		`{"type":"assistant","timestamp":"2026-07-09T00:00:03Z","sessionId":"growing","cwd":`+quoteJSON(repoRoot)+`,"message":{"role":"assistant","content":[{"type":"tool_use","id":"r2","name":"Read","input":{"file_path":`+quoteJSON(filepath.Join(repoRoot, "b.go"))+`}}]}}`,
+		`{"type":"user","timestamp":"2026-07-09T00:00:04Z","sessionId":"growing","cwd":`+quoteJSON(repoRoot)+`,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r2","content":"ok","is_error":false}]}}`,
+	)
+
+	secondTrace, secondCity, err := s.traceAndMap("growing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondTrace.Events) != 2 {
+		t.Fatalf("events after append = %d, want 2", len(secondTrace.Events))
+	}
+	if secondTrace == firstTrace {
+		t.Fatal("trace cache was reused after the session file changed")
+	}
+	if secondCity == firstCity {
+		t.Fatal("city cache was reused after the session file changed")
+	}
+}
+
+func TestSessionsFreshBypassesListTTL(t *testing.T) {
+	claudeDir := t.TempDir()
+	writeServerSession(t, filepath.Join(claudeDir, "first.jsonl"),
+		`{"type":"user","timestamp":"2026-07-09T00:00:00Z","sessionId":"first","cwd":"/tmp","message":{"role":"user","content":"hello"}}`,
+	)
+	s := New(Config{ClaudeDir: claudeDir, CodexDir: filepath.Join(t.TempDir(), "codex")})
+
+	initial := requestSessions(t, s, "/api/sessions")
+	if len(initial) != 1 {
+		t.Fatalf("initial sessions = %d, want 1", len(initial))
+	}
+	writeServerSession(t, filepath.Join(claudeDir, "second.jsonl"),
+		`{"type":"user","timestamp":"2026-07-09T00:00:01Z","sessionId":"second","cwd":"/tmp","message":{"role":"user","content":"hello"}}`,
+	)
+
+	cached := requestSessions(t, s, "/api/sessions")
+	if len(cached) != 1 {
+		t.Fatalf("cached sessions = %d, want 1", len(cached))
+	}
+	fresh := requestSessions(t, s, "/api/sessions?fresh=1")
+	if len(fresh) != 2 {
+		t.Fatalf("fresh sessions = %d, want 2", len(fresh))
+	}
+}
+
+func TestConcurrentFreshGenerationReusesCompletedScan(t *testing.T) {
+	claudeDir := t.TempDir()
+	writeServerSession(t, filepath.Join(claudeDir, "session.jsonl"),
+		`{"type":"user","timestamp":"2026-07-09T00:00:00Z","sessionId":"session","cwd":"/tmp","message":{"role":"user","content":"hello"}}`,
+	)
+	s := New(Config{ClaudeDir: claudeDir, CodexDir: filepath.Join(t.TempDir(), "codex")})
+
+	// Two fresh callers that enter before either scan completes observe the
+	// same generation. The second must reuse the first completed scan.
+	observed := s.freshGen
+	if _, err := s.listSessionsObserved(true, observed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.listSessionsObserved(true, observed); err != nil {
+		t.Fatal(err)
+	}
+	if s.freshGen != observed+1 {
+		t.Fatalf("fresh generation = %d, want %d", s.freshGen, observed+1)
+	}
+}
+
+func TestInflightLoadsShareOrAdvanceFileSnapshots(t *testing.T) {
+	t.Run("same fingerprint shares one snapshot", func(t *testing.T) {
+		s, source, session := newBlockingServer(t)
+		owner := make(chan traceMapResult, 1)
+		waiter := make(chan traceMapResult, 1)
+		go func() {
+			trace, city, err := s.traceAndMap("blocking")
+			owner <- traceMapResult{trace: trace, city: city, err: err}
+		}()
+		<-source.started
+		go func() {
+			trace, city, err := s.traceAndMap("blocking")
+			waiter <- traceMapResult{trace: trace, city: city, err: err}
+		}()
+		close(source.release)
+
+		first, second := <-owner, <-waiter
+		if first.err != nil || second.err != nil {
+			t.Fatalf("owner error=%v waiter error=%v", first.err, second.err)
+		}
+		if first.trace != second.trace || first.city != second.city {
+			t.Fatal("same file version did not share one trace/city snapshot")
+		}
+		if got := source.parses.Load(); got != 1 {
+			t.Fatalf("parse count = %d, want 1", got)
+		}
+		_ = session
+	})
+
+	t.Run("new fingerprint reloads after older inflight", func(t *testing.T) {
+		s, source, session := newBlockingServer(t)
+		owner := make(chan traceMapResult, 1)
+		newer := make(chan traceMapResult, 1)
+		go func() {
+			trace, city, err := s.traceAndMap("blocking")
+			owner <- traceMapResult{trace: trace, city: city, err: err}
+		}()
+		<-source.started
+		appendServerSession(t, session, "v2")
+		go func() {
+			trace, city, err := s.traceAndMap("blocking")
+			newer <- traceMapResult{trace: trace, city: city, err: err}
+		}()
+		close(source.release)
+
+		first, second := <-owner, <-newer
+		if first.err != nil || second.err != nil {
+			t.Fatalf("owner error=%v newer error=%v", first.err, second.err)
+		}
+		if first.trace.Session.Title != "v1" || second.trace.Session.Title != "v1\nv2" {
+			t.Fatalf("titles = %q then %q", first.trace.Session.Title, second.trace.Session.Title)
+		}
+		if got := source.parses.Load(); got != 2 {
+			t.Fatalf("parse count = %d, want 2", got)
+		}
+	})
 }
 
 func TestServerLoadsCodexSessions(t *testing.T) {
@@ -210,6 +376,75 @@ func TestServerSkipsClaudeSubagentSessions(t *testing.T) {
 	}
 }
 
+func TestServerSkipsCodexSubagentSessions(t *testing.T) {
+	claudeDir := t.TempDir()
+	codexDir := t.TempDir()
+	mainSession := filepath.Join(codexDir, "main.jsonl")
+	subagentSession := filepath.Join(codexDir, "subagent.jsonl")
+	writeServerJSONL(t, mainSession, map[string]any{
+		"timestamp": "2026-07-10T00:00:00Z",
+		"type":      "session_meta",
+		"payload": map[string]any{
+			"id":     "main-thread",
+			"cwd":    "/tmp",
+			"source": "vscode",
+		},
+	})
+	writeServerJSONL(t, subagentSession,
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:01Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":  "child-thread",
+				"cwd": "/tmp",
+				"source": map[string]any{
+					"subagent": map[string]any{
+						"thread_spawn": map[string]any{"parent_thread_id": "main-thread"},
+					},
+				},
+			},
+		},
+		map[string]any{
+			"timestamp": "2026-07-10T00:00:02Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":     "main-thread",
+				"cwd":    "/tmp",
+				"source": "vscode",
+			},
+		},
+	)
+
+	s := New(Config{ClaudeDir: claudeDir, CodexDir: codexDir})
+	sessions, err := s.scanSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "main-thread" || sessions[0].Path != mainSession {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+
+	// Default discovery hides auxiliary rollouts, while an explicitly opened
+	// path remains available for targeted inspection.
+	explicit := New(Config{ClaudeDir: claudeDir, CodexDir: codexDir, OpenSession: subagentSession})
+	explicitSessions, err := explicit.listSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(explicitSessions) != 2 {
+		t.Fatalf("explicit sessions = %#v", explicitSessions)
+	}
+	foundSubagent := false
+	for _, session := range explicitSessions {
+		if session.Path == subagentSession && session.ID == "child-thread" {
+			foundSubagent = true
+		}
+	}
+	if !foundSubagent {
+		t.Fatalf("explicit subagent missing from %#v", explicitSessions)
+	}
+}
+
 func writeServerSession(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	content := ""
@@ -219,6 +454,105 @@ func writeServerSession(t *testing.T, path string, lines ...string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func appendServerSession(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range lines {
+		if _, err := f.WriteString(line + "\n"); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requestSessions(t *testing.T, s *Server, target string) []model.SessionMeta {
+	t.Helper()
+	resp := httptest.NewRecorder()
+	s.handleSessions(resp, httptest.NewRequest(http.MethodGet, target, nil))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("sessions status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var sessions []model.SessionMeta
+	if err := json.Unmarshal(resp.Body.Bytes(), &sessions); err != nil {
+		t.Fatal(err)
+	}
+	return sessions
+}
+
+type blockingSource struct {
+	dir     string
+	root    string
+	started chan struct{}
+	release chan struct{}
+	parses  atomic.Int32
+}
+
+func (s *blockingSource) Harness() string    { return "blocking" }
+func (s *blockingSource) SessionDir() string { return s.dir }
+func (s *blockingSource) ListSessions() ([]model.SessionMeta, error) {
+	return nil, nil
+}
+
+func (s *blockingSource) Summarize(path string) (model.SessionMeta, error) {
+	return model.SessionMeta{
+		Key:     adapter.SessionKey(s.Harness(), path),
+		ID:      "blocking",
+		Harness: s.Harness(),
+		Path:    path,
+		Cwd:     s.root,
+	}, nil
+}
+
+func (s *blockingSource) Parse(path string) (*model.Trace, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if s.parses.Add(1) == 1 {
+		close(s.started)
+		<-s.release
+	}
+	return &model.Trace{
+		Version: 1,
+		Session: model.TraceSession{
+			ID:      "blocking",
+			Harness: s.Harness(),
+			Title:   strings.TrimSpace(string(content)),
+			Cwd:     s.root,
+			Path:    path,
+		},
+		Events: []model.Event{},
+		Marks:  []model.Mark{},
+	}, nil
+}
+
+type traceMapResult struct {
+	trace *model.Trace
+	city  *model.CityMap
+	err   error
+}
+
+func newBlockingServer(t *testing.T) (*Server, *blockingSource, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	session := filepath.Join(dir, "blocking.jsonl")
+	writeServerSession(t, session, "v1")
+	source := &blockingSource{dir: dir, root: root, started: make(chan struct{}), release: make(chan struct{})}
+	s := New(Config{})
+	s.adapters = []adapter.Source{source}
+	return s, source, session
 }
 
 func quoteJSON(path string) string {
