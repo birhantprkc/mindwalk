@@ -716,7 +716,8 @@ dd {
 
 .inspector {
   position: absolute;
-  top: 20px;
+  /* below the view toggle + encode note, so selecting never buries them */
+  top: 96px;
   right: 20px;
   bottom: 20px;
   width: 308px;
@@ -848,7 +849,7 @@ dd {
 
 .history-row {
   display: grid;
-  grid-template-columns: 10px 34px 1fr auto;
+  grid-template-columns: 10px max-content 1fr auto auto;
   align-items: center;
   gap: 9px;
   width: 100%;
@@ -858,6 +859,11 @@ dd {
   font-size: var(--text-sm);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+.history-time {
+  color: var(--faint);
+  font-size: var(--text-xs);
 }
 
 .history-row:hover {

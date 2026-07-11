@@ -1,5 +1,5 @@
 import { AlertTriangle, X } from "lucide-react";
-import type { CityFile, Touch, TraceEvent } from "../types";
+import { touchWord, type CityFile, type Touch, type TraceEvent } from "../types";
 
 interface InspectorProps {
   file: CityFile;
@@ -31,7 +31,7 @@ export function Inspector({ file, touch, history, onClose, onJumpTo }: Inspector
       <dl className="inspector-facts">
         <div>
           <dt>Touch</dt>
-          <dd className={touch ? `touch-${touch}` : undefined}>{touch ?? "unvisited"}</dd>
+          <dd className={touch ? `touch-${touch}` : undefined}>{touchWord(touch)}</dd>
         </div>
         <div>
           <dt>Lang</dt>
@@ -57,11 +57,12 @@ export function Inspector({ file, touch, history, onClose, onJumpTo }: Inspector
                 key={event.seq}
                 className="history-row"
                 onClick={() => onJumpTo(event.seq)}
-                title={event.summary}
+                title={`Jump to step ${event.seq + 1} — ${event.summary}`}
               >
                 <span className={`action-dot ${event.action}`} />
-                <strong>{event.seq}</strong>
+                <strong>#{event.seq + 1}</strong>
                 <span>{event.tool}</span>
+                <span className="history-time">{event.ts ? clock(event.ts) : ""}</span>
                 {event.isError ? <AlertTriangle className="history-err" size={13} /> : <span />}
               </button>
             ))}
@@ -72,4 +73,10 @@ export function Inspector({ file, touch, history, onClose, onJumpTo }: Inspector
       </section>
     </aside>
   );
+}
+
+function clock(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
 }
