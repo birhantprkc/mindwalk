@@ -2,40 +2,38 @@
 
 Replay a coding agent's walk through your codebase.
 
-mindwalk reads Claude Code and Codex session logs, lines them up against the
-repository they touched, and plays the session back as light moving through a
-night map of the repo. Where the agent searched, read, and edited, the map
-glows — everything else stays dark. It runs entirely locally from one Go
-binary; no session data leaves your machine.
+## The problem
+
+A session log records what an agent did, but not how it understood the task:
+which parts of the repo it treated as relevant, where it explored before it
+acted, whether its footprint matched the scope you had in mind. Reading the
+raw JSONL line by line doesn't answer any of that.
+
+## The idea
+
+Draw the repository as a night map, and play the session back as light moving
+through it: where the agent searched, read, and edited, the map glows —
+everything else stays dark. The agent's understanding of the task becomes a
+shape you can see at a glance. One Go binary reads Claude Code and Codex
+session logs, fully local; no session data leaves your machine.
 
 ![mindwalk replaying a session in the tree view](assets/screenshot.png)
 
 ## Quick start
 
 ```sh
-# Install the latest release on macOS or Linux.
 curl -fsSL https://raw.githubusercontent.com/cosmtrek/mindwalk/master/scripts/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 mindwalk
 ```
 
-The installer downloads the binary for the current OS and CPU from GitHub
-Releases, verifies it against `checksums.txt`, and installs it to
-`~/.local/bin`. Set `INSTALL_DIR` to choose another destination, or `VERSION`
-to install a specific release:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/cosmtrek/mindwalk/master/scripts/install.sh | \
-  VERSION=v0.1.0 INSTALL_DIR=/usr/local/bin sh
-```
-
-Windows archives and all supported platform binaries are available on the
-[GitHub Releases](https://github.com/cosmtrek/mindwalk/releases) page. To build
-from source instead, clone the repository and run `make setup && make build`;
-the binary is written to `bin/mindwalk`.
+The installer verifies the binary against `checksums.txt` and installs to
+`~/.local/bin` (override with `INSTALL_DIR`; pin a release with `VERSION`).
+Windows archives are on [GitHub Releases](https://github.com/cosmtrek/mindwalk/releases).
+To build from source: `make setup && make build` → `bin/mindwalk`.
 
 With no arguments, mindwalk scans `~/.claude/projects` and `~/.codex/sessions`,
-serves the UI on a random local port, and opens a browser. The other commands:
+serves the UI on a random local port, and opens a browser:
 
 ```text
 mindwalk serve [--port N] [--no-open] [--claude-dir DIR] [--codex-dir DIR]
@@ -46,34 +44,27 @@ mindwalk trace <session> [-o out]           write the normalized trace JSON
 
 ## Reading the picture
 
-- **Tree view** — the repository as a radial tree: directories branch, files
-  are leaves, and glow ∝ depth × revisits.
-- **Terrain view** — the same data as a treemap plain, where height stands in
-  for glow.
-- **Touch states** — each file keeps the deepest touch it received: seen
-  (moss green), read (moon white), edited (warm amber), unvisited (dark). The
-  HUD counts them live and folds friction signals — error rate, files churned
-  3+ times, edits after the last verify — into a review strip.
-- **Playback deck** — scrub or play the session. The strip is a bucketed
-  histogram of the whole run, each bar colored by its dominant action on a
-  cool/warm spectrum: observation stays cool (teal search, moon-blue read,
-  slate exec), mutation glows warm (sodium-amber edit, green verify), so
-  editing phases jump out of the background hum at a glance. Recent
-  transitions draw ember trails between files on the map.
-- **Timeline marks** — the lane above the strip carries the session's
-  structure: `◇` context compactions, `○` subagent launches, `›` user turns
-  (one per typed instruction). Every mark is a click-to-jump target, and the
-  key under the strip decodes all of it.
-- **Inspector** — click any file to pin its touch facts and per-event visit
-  history; clicking a visit row jumps the playhead to that moment.
+- **Tree / Terrain views** — the repo as a radial tree or a treemap plain;
+  glow ∝ how deeply and how often a file was touched.
+- **Touch states** — each file keeps its deepest touch: seen (moss green),
+  read (moon white), edited (warm amber), unvisited (dark). The HUD folds
+  friction signals — error rate, churned files, edits after the last verify —
+  into a review strip.
+- **Playback deck** — scrub or play the session over a bucketed histogram of
+  the run. Bars sit on a cool/warm spectrum: observation stays cool (search,
+  read, exec), mutation glows warm (edit, verify), so editing phases jump out
+  at a glance.
+- **Timeline marks** — `◇` context compactions, `○` subagent launches,
+  `›` user turns; every mark is a click-to-jump target.
+- **Inspector** — click a file to pin its visit history; click a visit row to
+  jump the playhead to that moment.
 
 ![the same session on the terrain view](assets/screenshot-terrain.png)
 
-Keyboard: `Space` play/pause · `←`/`→` step (`⇧` ×10) · `Home`/`End` jump to
-the ends · `S` cycle speed · `E` next edit · `X` next error · `M` next mark ·
-`⌘B` toggle the session rail.
+Keyboard: `Space` play/pause · `←`/`→` step (`⇧` ×10) · `Home`/`End` ends ·
+`S` speed · `E` next edit · `X` next error · `M` next mark · `⌘B` session rail.
 
-## How it works
+## Under the hood
 
 Two artifacts, kept deliberately separate:
 
@@ -84,23 +75,24 @@ Two artifacts, kept deliberately separate:
    replays are comparable across sessions.
 
 A local Go server (`internal/server`) joins the two and serves the
-React/Three.js frontend (`web`). `schema/` mirrors the exported JSON
-contracts.
+React/Three.js frontend (`web`). `schema/` mirrors the exported JSON contracts.
 
-## Development
+## Contributing
+
+Issues and pull requests are welcome. To get a working dev setup:
 
 ```sh
 make setup   # install frontend dependencies
-make test    # go test + frontend build
 make serve   # dev server on :8765, serving web/dist from the working tree
+make test    # go test + frontend build — run before sending a PR
 make build   # regenerate embedded assets and bin/mindwalk
 ```
 
-## Current limits
+Ground rules (see [AGENTS.md](AGENTS.md) for the full architecture notes):
 
-- Claude Code and Codex main-chain sessions only; Claude sidechain expansion
-  is future work.
-- Citymaps are built from the live worktree; alignment to the commit a session
-  actually ran against (`git ls-tree`) is not implemented yet.
-- Trace/citymap caching is in-memory; persistent `~/.cache/mindwalk` storage
-  is a follow-up.
+- Keep the boundaries: adapters don't know about rendering, citymap generation
+  doesn't depend on playback, the server just connects the two.
+- Keep Go code `gofmt`-ed; never hand-edit `internal/server/static` —
+  regenerate it with `make build`.
+- When trace or citymap JSON shapes change, update `schema/` and the relevant
+  tests in the same change.
