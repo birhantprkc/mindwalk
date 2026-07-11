@@ -1,9 +1,19 @@
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { CityFile, CityMap, Touch } from "../types";
+import { touchWord, type CityFile, type CityMap, type Touch } from "../types";
 import type { FilePlayback } from "../playback/reducer";
-import { disposeGroup, EMBER, fitDistance, prefersReducedMotion, SKY, touchColors } from "./sceneUtils";
+import { DirLabelSet } from "./dirLabels";
+import {
+  disposeGroup,
+  EMBER,
+  ensureVisible,
+  fitDistance,
+  prefersReducedMotion,
+  SceneTip,
+  SKY,
+  touchColors
+} from "./sceneUtils";
 import { fireflyTexture } from "./textures";
 import { TrailRenderer } from "./trail";
 
@@ -24,6 +34,9 @@ const colors: Record<Touch | "unvisited" | "ghost" | "selected", THREE.Color> = 
 };
 
 const TILE_H = 0.14;
+const LABEL_Y = 2.4;
+// the inspector docks on the right; selection pans the camera clear of it
+const INSPECTOR_RESERVED_PX = 348;
 
 function attentionHeight(touch: Touch, visits: number): number {
   const base = touch === "edit" ? 7.2 : touch === "read" ? 4.2 : 1.6;
@@ -50,9 +63,13 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
   const cityGroupRef = useRef<THREE.Group | null>(null);
   const trailRef = useRef<TrailRenderer | null>(null);
   const fireflyRef = useRef<THREE.Sprite | null>(null);
+  const labelSetRef = useRef<DirLabelSet | null>(null);
   const frameRef = useRef<number | null>(null);
   const reducedRef = useRef(false);
   const boundsRef = useRef({ cx: 0, cz: 0, size: 120 });
+  // handlers live in the mount effect; they read playback through this ref
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
   // camera fit deferred while the viewport reports no size (hidden pane,
   // background tab); resize retries it instead of leaving the camera at NaN
   const fitPendingRef = useRef<(() => boolean) | null>(null);
@@ -105,8 +122,10 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
     // the god view drifts slowly around the terrain until the user takes over
     controls.autoRotate = !reduced;
     controls.autoRotateSpeed = -0.5;
+    const tip = new SceneTip(host);
     controls.addEventListener("start", () => {
       controls.autoRotate = false;
+      tip.hide();
     });
     controlsRef.current = controls;
 
@@ -118,6 +137,22 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
+    const pickFile = (event: PointerEvent): CityFile | undefined => {
+      if (!cameraRef.current || !rendererRef.current) return undefined;
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, cameraRef.current);
+      const targets = [terrainMeshRef.current, tileMeshRef.current].filter(Boolean) as THREE.Object3D[];
+      const hit = raycaster.intersectObjects(targets, false)[0];
+      if (!hit || hit.instanceId === undefined) return undefined;
+      if (hit.object === terrainMeshRef.current) {
+        const slot = slotsRef.current[hit.instanceId];
+        return slot ? filesRef.current[slot.fileId] : undefined;
+      }
+      return filesRef.current[hit.instanceId];
+    };
+
     let downAt: { x: number; y: number } | null = null;
     const onPointerDown = (event: PointerEvent) => {
       downAt = { x: event.clientX, y: event.clientY };
@@ -127,26 +162,41 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
       const moved = Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y);
       downAt = null;
       if (moved > 5) return;
-      if (!cameraRef.current || !rendererRef.current) return;
-      const rect = rendererRef.current.domElement.getBoundingClientRect();
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, cameraRef.current);
-      const targets = [terrainMeshRef.current, tileMeshRef.current].filter(Boolean) as THREE.Object3D[];
-      const hit = raycaster.intersectObjects(targets, false)[0];
-      if (hit && hit.instanceId !== undefined) {
-        if (hit.object === terrainMeshRef.current) {
-          const slot = slotsRef.current[hit.instanceId];
-          onSelect(slot ? filesRef.current[slot.fileId]?.path : undefined);
-        } else {
-          onSelect(filesRef.current[hit.instanceId]?.path);
-        }
-      } else {
-        onSelect(undefined);
+      onSelect(pickFile(event)?.path);
+    };
+    // hover: cursor + one-line readout, throttled to one raycast per frame
+    let hoverRaf = 0;
+    const onPointerMove = (event: PointerEvent) => {
+      if (downAt) {
+        tip.hide();
+        return;
       }
+      if (hoverRaf) return;
+      hoverRaf = requestAnimationFrame(() => {
+        hoverRaf = 0;
+        const file = pickFile(event);
+        renderer.domElement.style.cursor = file ? "pointer" : "";
+        if (!file) {
+          tip.hide();
+          return;
+        }
+        const snapshot = playbackRef.current;
+        const touch = snapshot.touchByPath.get(file.path);
+        const visits = snapshot.visitsByFile.get(file.id) ?? 0;
+        const meta = touch
+          ? `${touchWord(touch)} · ${visits} visit${visits === 1 ? "" : "s"}`
+          : touchWord(undefined);
+        tip.show(file.path, file.ghost ? `${meta} · ghost` : meta, event.clientX, event.clientY);
+      });
+    };
+    const onPointerLeave = () => {
+      tip.hide();
+      renderer.domElement.style.cursor = "";
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("pointerleave", onPointerLeave);
 
     const resize = () => {
       if (!hostRef.current) return;
@@ -166,6 +216,8 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
     const quaternion = new THREE.Quaternion();
     const render = () => {
       controls.update();
+      labelSetRef.current?.updateTargets(camera, renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+      labelSetRef.current?.ease(reducedRef.current);
 
       // grow / shrink terrain columns toward their attention targets
       const terrain = terrainMeshRef.current;
@@ -218,8 +270,12 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
 
     return () => {
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      if (hoverRaf) cancelAnimationFrame(hoverRaf);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
+      tip.dispose();
       observer.disconnect();
       controls.dispose();
       renderer.dispose();
@@ -316,6 +372,24 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
     terrainMeshRef.current = terrain;
     group.add(terrain);
 
+    // district labels above the plain; drawn over the columns so a mountain
+    // range never buries the name of the district behind it
+    labelSetRef.current = new DirLabelSet(
+      city.dirs
+        .filter((dir) => dir.depth >= 1 && dir.fileCount > 0 && dir.rect.w > 0 && dir.rect.d > 0)
+        .map((dir) => ({
+          name: dirBasename(dir.path),
+          x: dir.rect.x + dir.rect.w / 2 - bounds.cx,
+          z: dir.rect.z + dir.rect.d / 2 - bounds.cz,
+          radius: Math.hypot(dir.rect.w, dir.rect.d) / 2,
+          fileCount: dir.fileCount,
+          depth: dir.depth
+        })),
+      group,
+      LABEL_Y,
+      true
+    );
+
     const firefly = new THREE.Sprite(
       new THREE.SpriteMaterial({
         map: fireflyTexture(),
@@ -374,6 +448,7 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
       terrainMeshRef.current = null;
       trailRef.current = null;
       fireflyRef.current = null;
+      labelSetRef.current = null;
     };
   }, [city, bounds]);
 
@@ -414,6 +489,21 @@ export function CityScene({ city, playback, selectedPath, onSelect }: CitySceneP
     if (tiles.instanceColor) tiles.instanceColor.needsUpdate = true;
     slotsRef.current = slots;
   }, [city, playback, selectedPath]);
+
+  // the inspector opens over the right edge; pan the selected tile clear of it
+  useEffect(() => {
+    if (!city || !selectedPath) return;
+    const file = city.files.find((f) => f.path === selectedPath);
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    const canvas = rendererRef.current?.domElement;
+    if (!file || !camera || !controls || !canvas) return;
+    controls.autoRotate = false;
+    const top = heightsRef.current.get(file.id) ?? TILE_H;
+    const world = centerFor(file, bounds);
+    world.y = top;
+    ensureVisible(camera, controls, world, canvas.clientWidth, canvas.clientHeight, INSPECTOR_RESERVED_PX);
+  }, [city, bounds, selectedPath]);
 
   // trail: ballistic arcs between recent fixations + the firefly at the head
   useEffect(() => {
@@ -485,4 +575,8 @@ function baseColor(file: CityFile): THREE.Color {
 
 function centerFor(file: CityFile, bounds: { cx: number; cz: number }): THREE.Vector3 {
   return new THREE.Vector3(file.rect.x + file.rect.w / 2 - bounds.cx, 0, file.rect.z + file.rect.d / 2 - bounds.cz);
+}
+
+function dirBasename(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1) || path;
 }

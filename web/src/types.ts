@@ -1,6 +1,21 @@
 export type Action = "search" | "read" | "edit" | "exec" | "verify" | "other";
 export type Touch = "hit" | "read" | "edit";
 
+/** the words the HUD legend uses for each touch state — every surface that
+ * names a touch must speak this vocabulary, not the wire values */
+export function touchWord(touch?: Touch): string {
+  switch (touch) {
+    case "hit":
+      return "seen";
+    case "read":
+      return "read";
+    case "edit":
+      return "edited";
+    default:
+      return "unvisited";
+  }
+}
+
 export interface SessionMeta {
   key: string;
   id: string;

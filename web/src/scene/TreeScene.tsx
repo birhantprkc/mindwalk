@@ -1,11 +1,20 @@
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { CityFile, CityMap, Touch } from "../types";
+import { touchWord, type CityFile, type CityMap, type Touch } from "../types";
 import type { FilePlayback } from "../playback/reducer";
-import { disposeGroup, fitDistance, prefersReducedMotion, SKY, touchColors } from "./sceneUtils";
+import { DirLabelSet } from "./dirLabels";
+import {
+  disposeGroup,
+  ensureVisible,
+  fitDistance,
+  prefersReducedMotion,
+  SceneTip,
+  SKY,
+  touchColors
+} from "./sceneUtils";
 import { computeTreeLayout, type TreeLayout } from "./treeLayout";
-import { fireflyTexture, haloTexture, labelTexture } from "./textures";
+import { fireflyTexture, haloTexture } from "./textures";
 import { TrailRenderer } from "./trail";
 
 interface TreeSceneProps {
@@ -47,22 +56,9 @@ interface HaloSlot {
   color: THREE.Color;
 }
 
-// map-style LOD for directory names: a label shows while its subtree spans
-// enough screen pixels — zoom out and only the big forks stay named, push
-// in and deeper directories surface where you're looking
-interface DirLabel {
-  sprite: THREE.Sprite;
-  x: number;
-  z: number;
-  radius: number;
-  fileCount: number;
-  depth: number;
-  aspect: number;
-  target: number;
-}
 const LABEL_Y = 1.8;
-const LABEL_MIN_SUBTREE_PX = 60;
-const LABEL_BUDGET = 120;
+// the inspector docks on the right; selection pans the camera clear of it
+const INSPECTOR_RESERVED_PX = 348;
 
 export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -84,10 +80,12 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
   const groupRef = useRef<THREE.Group | null>(null);
   const trailRef = useRef<TrailRenderer | null>(null);
   const fireflyRef = useRef<THREE.Sprite | null>(null);
-  const labelsRef = useRef<DirLabel[]>([]);
-  const labelsDirtyRef = useRef(false);
+  const labelSetRef = useRef<DirLabelSet | null>(null);
   const frameRef = useRef<number | null>(null);
   const reducedRef = useRef(false);
+  // handlers live in the mount effect; they read playback through this ref
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
   // camera fit deferred while the viewport reports no size (hidden pane,
   // background tab); resize retries it instead of leaving the camera at NaN
   const fitPendingRef = useRef<(() => boolean) | null>(null);
@@ -120,8 +118,10 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     controls.maxPolarAngle = Math.PI * 0.44;
     controls.autoRotate = !reduced;
     controls.autoRotateSpeed = -0.5;
+    const tip = new SceneTip(host);
     controls.addEventListener("start", () => {
       controls.autoRotate = false;
+      tip.hide();
     });
     controlsRef.current = controls;
 
@@ -132,24 +132,16 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     scene.add(moon);
 
     // screen-space nearest-leaf picking: tiny orbs are hostile raycast
-    // targets, so select whatever leaf lands closest to the pointer
+    // targets, so pick whatever leaf lands closest to the pointer
     const PICK_RADIUS = 18;
     const projected = new THREE.Vector3();
-    let downAt: { x: number; y: number } | null = null;
-    const onPointerDown = (event: PointerEvent) => {
-      downAt = { x: event.clientX, y: event.clientY };
-    };
-    const onPointerUp = (event: PointerEvent) => {
-      if (!downAt) return;
-      const moved = Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y);
-      downAt = null;
-      if (moved > 5) return;
+    const pickFile = (event: PointerEvent): CityFile | undefined => {
       const treeLayout = layoutRef.current;
-      if (!treeLayout || !cameraRef.current || !rendererRef.current) return;
+      if (!treeLayout || !cameraRef.current || !rendererRef.current) return undefined;
       const rect = rendererRef.current.domElement.getBoundingClientRect();
       const px = event.clientX - rect.left;
       const py = event.clientY - rect.top;
-      let bestPath: string | undefined;
+      let best: CityFile | undefined;
       let bestD2 = PICK_RADIUS * PICK_RADIUS;
       for (const file of filesRef.current) {
         const pos = treeLayout.leaf.get(file.id);
@@ -161,13 +153,56 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
         const d2 = (sx - px) * (sx - px) + (sy - py) * (sy - py);
         if (d2 < bestD2) {
           bestD2 = d2;
-          bestPath = file.path;
+          best = file;
         }
       }
-      onSelect(bestPath);
+      return best;
+    };
+
+    let downAt: { x: number; y: number } | null = null;
+    const onPointerDown = (event: PointerEvent) => {
+      downAt = { x: event.clientX, y: event.clientY };
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (!downAt) return;
+      const moved = Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y);
+      downAt = null;
+      if (moved > 5) return;
+      onSelect(pickFile(event)?.path);
+    };
+    // hover: cursor + one-line readout, throttled to one pick per frame
+    let hoverRaf = 0;
+    const onPointerMove = (event: PointerEvent) => {
+      if (downAt) {
+        tip.hide();
+        return;
+      }
+      if (hoverRaf) return;
+      hoverRaf = requestAnimationFrame(() => {
+        hoverRaf = 0;
+        const file = pickFile(event);
+        renderer.domElement.style.cursor = file ? "pointer" : "";
+        if (!file) {
+          tip.hide();
+          return;
+        }
+        const snapshot = playbackRef.current;
+        const touch = snapshot.touchByPath.get(file.path);
+        const visits = snapshot.visitsByFile.get(file.id) ?? 0;
+        const meta = touch
+          ? `${touchWord(touch)} · ${visits} visit${visits === 1 ? "" : "s"}`
+          : touchWord(undefined);
+        tip.show(file.path, file.ghost ? `${meta} · ghost` : meta, event.clientX, event.clientY);
+      });
+    };
+    const onPointerLeave = () => {
+      tip.hide();
+      renderer.domElement.style.cursor = "";
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("pointerleave", onPointerLeave);
 
     const resize = () => {
       if (!hostRef.current) return;
@@ -182,95 +217,13 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     const observer = new ResizeObserver(resize);
     observer.observe(host);
 
-    // label LOD pass: reprojects directory subtrees whenever the camera or
-    // viewport moves, picks the labels whose subtree is prominent on screen,
-    // and drops whichever of two colliding labels matters less
-    const lastCamPos = new THREE.Vector3(Infinity, Infinity, Infinity);
-    const lastCamQuat = new THREE.Quaternion(0, 0, 0, 0);
-    let lastViewW = 0;
-    let lastViewH = 0;
-    const labelPoint = new THREE.Vector3();
-    const computeLabelTargets = () => {
-      const labels = labelsRef.current;
-      if (labels.length === 0) return;
-      const w = renderer.domElement.clientWidth;
-      const h = renderer.domElement.clientHeight;
-      if (w === 0 || h === 0) return;
-      const moved =
-        labelsDirtyRef.current ||
-        !camera.position.equals(lastCamPos) ||
-        !camera.quaternion.equals(lastCamQuat) ||
-        w !== lastViewW ||
-        h !== lastViewH;
-      if (!moved) return;
-      labelsDirtyRef.current = false;
-      lastCamPos.copy(camera.position);
-      lastCamQuat.copy(camera.quaternion);
-      lastViewW = w;
-      lastViewH = h;
-
-      const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-      const maxDim = Math.max(w, h);
-      interface Candidate {
-        label: DirLabel;
-        sx: number;
-        sy: number;
-        pw: number;
-        ph: number;
-      }
-      const candidates: Candidate[] = [];
-      for (const label of labels) {
-        labelPoint.set(label.x, LABEL_Y, label.z);
-        const dist = labelPoint.distanceTo(camera.position);
-        const pxPerWorld = h / (2 * dist * tanV);
-        const subtreePx = label.radius * pxPerWorld;
-        labelPoint.project(camera);
-        const sx = ((labelPoint.x + 1) / 2) * w;
-        const sy = ((1 - labelPoint.y) / 2) * h;
-        const onScreen = labelPoint.z < 1 && sx > -60 && sx < w + 60 && sy > -40 && sy < h + 40;
-        // too small to matter, or so large we're inside it — either way the
-        // name would float over unrelated geometry
-        if (!onScreen || subtreePx < LABEL_MIN_SUBTREE_PX || subtreePx > maxDim * 1.6) {
-          label.target = 0;
-          continue;
-        }
-        // constant screen-size type, like map labels
-        const ph = label.depth <= 1 ? 15 : 13;
-        const worldH = ph / pxPerWorld;
-        label.sprite.scale.set(worldH * label.aspect, worldH, 1);
-        candidates.push({ label, sx, sy, pw: ph * label.aspect, ph });
-      }
-      candidates.sort((a, b) => b.label.fileCount - a.label.fileCount);
-      const kept: Candidate[] = [];
-      for (const candidate of candidates) {
-        const clash = kept.some(
-          (other) =>
-            Math.abs(other.sx - candidate.sx) < (other.pw + candidate.pw) / 2 + 14 &&
-            Math.abs(other.sy - candidate.sy) < (other.ph + candidate.ph) / 2 + 10
-        );
-        candidate.label.target = clash ? 0 : 1;
-        if (!clash) kept.push(candidate);
-      }
-    };
-
     const clock = new THREE.Clock();
     const matrix = new THREE.Matrix4();
     const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
     const render = () => {
       controls.update();
-      computeLabelTargets();
-
-      // labels ease toward their LOD targets
-      for (const label of labelsRef.current) {
-        const material = label.sprite.material as THREE.SpriteMaterial;
-        const diff = label.target - material.opacity;
-        if (Math.abs(diff) > 0.02) {
-          material.opacity = reducedRef.current ? label.target : material.opacity + diff * 0.16;
-        } else if (material.opacity !== label.target) {
-          material.opacity = label.target;
-        }
-        label.sprite.visible = material.opacity > 0.02;
-      }
+      labelSetRef.current?.updateTargets(camera, renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+      labelSetRef.current?.ease(reducedRef.current);
 
       // pools of light grow toward their attention radius
       const halos = haloMeshRef.current;
@@ -318,8 +271,12 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
 
     return () => {
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      if (hoverRaf) cancelAnimationFrame(hoverRaf);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("pointerleave", onPointerLeave);
+      tip.dispose();
       observer.disconnect();
       controls.dispose();
       renderer.dispose();
@@ -462,40 +419,9 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
     haloMeshRef.current = halos;
     group.add(halos);
 
-    // directory labels: sprites for the biggest subtrees (screen-space LOD
-    // in the render loop decides which are visible); they start invisible
-    // and fade in once the first projection pass runs
-    const labels: DirLabel[] = [];
-    const labeled = [...layout.dirs].sort((a, b) => b.fileCount - a.fileCount).slice(0, LABEL_BUDGET);
-    for (const dir of labeled) {
-      const { texture, aspect } = labelTexture(dir.name);
-      const sprite = new THREE.Sprite(
-        new THREE.SpriteMaterial({
-          map: texture,
-          transparent: true,
-          opacity: 0,
-          depthWrite: false,
-          toneMapped: false,
-          fog: false
-        })
-      );
-      sprite.visible = false;
-      sprite.position.set(dir.x, LABEL_Y, dir.z);
-      sprite.raycast = () => undefined;
-      group.add(sprite);
-      labels.push({
-        sprite,
-        x: dir.x,
-        z: dir.z,
-        radius: dir.radius,
-        fileCount: dir.fileCount,
-        depth: dir.depth,
-        aspect,
-        target: 0
-      });
-    }
-    labelsRef.current = labels;
-    labelsDirtyRef.current = true;
+    // directory labels: screen-space LOD in the render loop decides which
+    // of the biggest subtrees show their name
+    labelSetRef.current = new DirLabelSet(layout.dirs, group, LABEL_Y);
 
     const firefly = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -587,7 +513,7 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
       edgesRef.current = null;
       trailRef.current = null;
       fireflyRef.current = null;
-      labelsRef.current = [];
+      labelSetRef.current = null;
     };
   }, [city, layout]);
 
@@ -671,6 +597,21 @@ export function TreeScene({ city, playback, selectedPath, onSelect }: TreeSceneP
       selection.beam.position.set(pos.x, 3, pos.z);
       selection.ring.visible = true;
       selection.beam.visible = true;
+      // the inspector opens over the right edge; pan the leaf clear of it
+      const camera = cameraRef.current;
+      const controls = controlsRef.current;
+      const canvas = rendererRef.current?.domElement;
+      if (camera && controls && canvas) {
+        controls.autoRotate = false;
+        ensureVisible(
+          camera,
+          controls,
+          new THREE.Vector3(pos.x, LEAF_Y, pos.z),
+          canvas.clientWidth,
+          canvas.clientHeight,
+          INSPECTOR_RESERVED_PX
+        );
+      }
     } else {
       selection.ring.visible = false;
       selection.beam.visible = false;

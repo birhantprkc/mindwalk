@@ -9,7 +9,9 @@ export const EMBER = new THREE.Color("#ff9e5e");
 
 export const touchColors: Record<Touch | "selected", THREE.Color> = {
   hit: new THREE.Color("#8fb45f"),
-  read: new THREE.Color("#c3d6ec"),
+  // chromatic enough to read as blue on lit terrain columns — a paler tint
+  // washed out to white and stopped matching the HUD legend
+  read: new THREE.Color("#a5c8f1"),
   edit: new THREE.Color("#f0ad5a"),
   selected: new THREE.Color("#f6ead2")
 };
@@ -39,6 +41,84 @@ export function fitDistance(
     );
   }
   return distance;
+}
+
+// Pan the camera (position + orbit target together, so the view direction
+// holds) until `world` projects inside the viewport's safe area. The right
+// margin reserves room for the inspector panel, which would otherwise sit
+// exactly on top of the leaf the user just selected.
+export function ensureVisible(
+  camera: THREE.PerspectiveCamera,
+  controls: { target: THREE.Vector3; update: () => void },
+  world: THREE.Vector3,
+  viewW: number,
+  viewH: number,
+  reservedRight: number
+) {
+  if (viewW === 0 || viewH === 0) return;
+  const forward = camera.getWorldDirection(new THREE.Vector3());
+  const depth = world.clone().sub(camera.position).dot(forward);
+  if (depth <= 0) return; // behind the camera: panning math breaks down
+  const projected = world.clone().project(camera);
+  const sx = ((projected.x + 1) / 2) * viewW;
+  const sy = ((1 - projected.y) / 2) * viewH;
+  const safeL = 48;
+  const safeR = Math.max(safeL + 60, viewW - reservedRight - 48);
+  const safeT = 120;
+  const safeB = viewH - 100;
+  const targetX = Math.min(Math.max(sx, safeL), safeR);
+  const targetY = Math.min(Math.max(sy, safeT), safeB);
+  if (targetX === sx && targetY === sy) return;
+  const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+  const tanH = tanV * camera.aspect;
+  const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+  const up = new THREE.Vector3().crossVectors(right, forward);
+  // moving the camera right shifts the point left on screen, and vice versa
+  const pan = right
+    .multiplyScalar(((sx - targetX) * 2 * depth * tanH) / viewW)
+    .addScaledVector(up, ((targetY - sy) * 2 * depth * tanV) / viewH);
+  camera.position.add(pan);
+  controls.target.add(pan);
+  controls.update();
+}
+
+// One-line hover readout, driven imperatively from the scenes' pointermove
+// handlers so hovering never re-renders the React tree.
+export class SceneTip {
+  private readonly el: HTMLDivElement;
+  private readonly pathEl: HTMLSpanElement;
+  private readonly metaEl: HTMLSpanElement;
+
+  constructor(private readonly host: HTMLElement) {
+    this.el = document.createElement("div");
+    this.el.className = "scene-tip";
+    this.pathEl = document.createElement("span");
+    this.metaEl = document.createElement("span");
+    this.metaEl.className = "dim";
+    this.el.append(this.pathEl, this.metaEl);
+    host.appendChild(this.el);
+  }
+
+  show(path: string, meta: string, clientX: number, clientY: number) {
+    this.pathEl.textContent = path;
+    this.metaEl.textContent = ` · ${meta}`;
+    this.el.style.display = "block";
+    const bounds = this.host.getBoundingClientRect();
+    const x = clientX - bounds.left;
+    const y = clientY - bounds.top;
+    const left = Math.min(x + 14, Math.max(0, bounds.width - this.el.offsetWidth - 8));
+    const top = Math.min(y + 16, Math.max(0, bounds.height - this.el.offsetHeight - 8));
+    this.el.style.left = `${left}px`;
+    this.el.style.top = `${top}px`;
+  }
+
+  hide() {
+    this.el.style.display = "none";
+  }
+
+  dispose() {
+    this.el.remove();
+  }
 }
 
 export const prefersReducedMotion = () =>

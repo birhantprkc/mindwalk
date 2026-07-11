@@ -21,7 +21,7 @@
 
   /* the light scale */
   --moss: oklch(0.78 0.11 131);
-  --moon: oklch(0.87 0.05 236);
+  --moon: oklch(0.83 0.07 250);
   --amber: oklch(0.79 0.13 68);
   --ember: oklch(0.73 0.16 52);
   --pine: oklch(0.72 0.09 155);
@@ -572,7 +572,7 @@ dd {
 
 .legend-dot.read {
   background: var(--moon);
-  box-shadow: 0 0 7px oklch(0.87 0.05 236 / 0.8);
+  box-shadow: 0 0 7px oklch(0.83 0.07 250 / 0.8);
 }
 
 .legend-dot.edit {
@@ -595,6 +595,33 @@ dd {
   font-size: var(--text-xs);
   letter-spacing: 0.06em;
   text-align: right;
+}
+
+/* ---------- scene hover tip ---------- */
+
+/* imperatively driven by the scenes: one line, follows the pointer */
+.scene-tip {
+  position: absolute;
+  z-index: 30;
+  display: none;
+  max-width: 380px;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 4px;
+  background: oklch(0.245 0.014 256 / 0.97);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  letter-spacing: 0.01em;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-tip .dim {
+  color: var(--muted);
 }
 
 /* ---------- inspector ---------- */
