@@ -1,6 +1,6 @@
 # <img src="assets/logo.svg" alt="" width="30" /> mindwalk
 
-Replay a coding agent's walk through your codebase.
+A visualization tool that replays coding-agent sessions on a 3D map of your codebase.
 
 ## The problem
 
