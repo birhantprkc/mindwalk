@@ -2,6 +2,10 @@
 
 A visualization tool that replays coding-agent sessions on a 3D map of your codebase.
 
+https://github.com/user-attachments/assets/6490cd77-0374-4f36-a6e7-24267d5c61f3
+
+*The 30-second demo — sound on.*
+
 ## The problem
 
 A session log records what an agent did, but not how it understood the task:
@@ -16,8 +20,6 @@ through it: where the agent searched, read, and edited, the map glows —
 everything else stays dark. The agent's understanding of the task becomes a
 shape you can see at a glance. One Go binary reads Claude Code and Codex
 session logs, fully local; no session data leaves your machine.
-
-![mindwalk replaying a session in the tree view](assets/screenshot.png)
 
 ## Quick start
 
