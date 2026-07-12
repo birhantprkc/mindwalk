@@ -98,3 +98,7 @@ Ground rules (see [AGENTS.md](AGENTS.md) for the full architecture notes):
   regenerate it with `make build`.
 - When trace or citymap JSON shapes change, update `schema/` and the relevant
   tests in the same change.
+
+## License
+
+[MIT](LICENSE) © 2026 Ricko Yu
