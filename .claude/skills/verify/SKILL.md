@@ -21,11 +21,15 @@ Gotchas:
   server; pick another port and check the log for `bind: address already in use`.
 - Sessions come from `~/.claude/projects` — this machine has real data, no
   fixtures needed. `testdata/claude-session.jsonl` works via `mindwalk open`.
+- `bin/mindwalk map <repo>` (or the `/?map=1&repo=<path>` URL) serves the
+  static citymap with no session.
 
 ## Drive (headless Chrome + CDP, no npm installs)
 
-System Chrome + raw CDP over Node's built-in WebSocket works; WebGL renders
-under `--headless=new` with `--use-angle=swiftshader --enable-unsafe-swiftshader`:
+System Chrome + raw CDP over Node's built-in WebSocket works. WebGL renders
+under plain `--headless=new` on the real GPU (Metal, ~120fps); add
+`--use-angle=swiftshader --enable-unsafe-swiftshader` only if GPU init fails
+(software rendering is ~3x slower):
 
 ```sh
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -37,12 +41,21 @@ New-tab endpoint needs PUT: `fetch('http://127.0.0.1:9333/json/new?<url>', {meth
 
 ## Flows worth driving
 
-- Load via `/?session=<id>` deep link; assert `.session-row.active .session-title`.
-- Readout `.readout-count` shows `N / N` after load (playhead starts at end).
+- Load via `/?session=<key>` deep link (legacy bare session id resolves only if
+  unique); assert `.session-row.active .session-title`.
+- Readout `.deck-pos-count` shows `N / N` after load (playhead starts at end).
 - `[aria-label="Restart playback"]` → `1 / N`; `[aria-label="Play playback"]`
-  → ~3 ticks/second; playback draws the ember trail + firefly.
+  → ~3 ticks/second at 1× (the `.speed-btn` / `S` key cycles the multiplier);
+  playback draws the ember trail + firefly.
 - View toggle `Tree` / `Terrain` buttons rebuild the scene — watch for
   `Runtime.exceptionThrown`.
+- `/?map=1&repo=<abs-path>` renders the citymap with no trace and no transport
+  (map-only mode); the HUD `Map` button opens the same URL via `window.open`,
+  so in headless drive the URL directly instead of clicking.
+- `[aria-label="Export video"]` records playback client-side (MediaRecorder →
+  webm download): the label flips to `Recording video`, the transport, rail,
+  and view toggle lock while recording, and the playhead restores afterwards.
+  Capture the download in CDP with `Browser.setDownloadBehavior`.
 - Rapid session switch (click uncached row, 150ms later a cached row) must end
   showing the last-clicked session's data.
 - Bogus `?session=` must fall back to the newest session with a console.warn.
