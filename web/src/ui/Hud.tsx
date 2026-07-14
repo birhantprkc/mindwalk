@@ -1,7 +1,5 @@
-import { Map as MapIcon } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
 import type { ActionCounts, CityMap, MetricObservability, Trace } from "../types";
-import type { SceneView } from "../state/store";
 
 export interface ChurnEntry {
   path: string;
@@ -11,20 +9,12 @@ export interface ChurnEntry {
 interface HudProps {
   trace?: Trace;
   city?: CityMap;
-  view: SceneView;
   // live counts at the playhead, passed as primitives so memo stays effective
   editedNow: number;
   readNow: number;
   seenNow: number;
   churn: ChurnEntry[];
-  onViewChange: (view: SceneView) => void;
   onSelectFile: (path: string) => void;
-  // opens the static full-repo map for a repo path in a new tab; omit the path
-  // to use the current session's repo (trace.session.cwd)
-  onOpenMap: (repo?: string) => void;
-  // while a video export records, the view toggle is locked so switching scenes
-  // can't tear down and replace the canvas the recorder is capturing
-  locked?: boolean;
 }
 
 const CHURN_PANEL_ROWS = 8;
@@ -34,20 +24,13 @@ const CHURN_PANEL_ROWS = 8;
 export const Hud = memo(function Hud({
   trace,
   city,
-  view,
   editedNow,
   readNow,
   seenNow,
   churn,
-  onViewChange,
-  onSelectFile,
-  onOpenMap,
-  locked = false
+  onSelectFile
 }: HudProps) {
   const stats = trace?.stats;
-  const [mapOpen, setMapOpen] = useState(false);
-  const [mapPath, setMapPath] = useState("");
-  const sessionRepo = trace?.session.cwd;
   const readFinal = stats ? stats.fovea - stats.edited : 0;
   const unvisitedNow = stats ? Math.max(0, stats.filesInRepo - editedNow - readNow - seenNow) : 0;
   const unvisitedFinal = stats ? Math.max(0, stats.filesInRepo - stats.fovea - stats.parafovea) : 0;
@@ -243,75 +226,6 @@ export const Hud = memo(function Hud({
           </>
         ) : null}
       </div>
-      {city ? (
-        <div className="hud-right">
-          <div className="view-toggle" role="group" aria-label="Scene view">
-            <button
-              className={view === "tree" ? "active" : ""}
-              onClick={() => onViewChange("tree")}
-              disabled={locked}
-            >
-              Tree
-            </button>
-            <button
-              className={view === "terrain" ? "active" : ""}
-              onClick={() => onViewChange("terrain")}
-              disabled={locked}
-            >
-              Terrain
-            </button>
-          </div>
-          <div className="map-controls">
-            <button
-              className="map-btn"
-              onClick={() => setMapOpen((open) => !open)}
-              aria-expanded={mapOpen}
-              data-hint="Open a static full-repo map — this session's repo, or any repo path"
-            >
-              <MapIcon size={13} />
-              <span>Map</span>
-            </button>
-            {mapOpen ? (
-              <div className="map-menu">
-                {sessionRepo ? (
-                  <button className="map-menu-row" onClick={() => onOpenMap(sessionRepo)} title={sessionRepo}>
-                    This session's repo
-                  </button>
-                ) : null}
-                <form
-                  className="map-menu-form"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    const path = mapPath.trim();
-                    if (path) onOpenMap(path);
-                  }}
-                >
-                  <input
-                    type="text"
-                    className="map-menu-input"
-                    placeholder="/path/to/repo"
-                    value={mapPath}
-                    onChange={(e) => setMapPath(e.currentTarget.value)}
-                    spellCheck={false}
-                  />
-                  <button type="submit" className="map-menu-go" disabled={mapPath.trim() === ""}>
-                    Open
-                  </button>
-                </form>
-              </div>
-            ) : null}
-          </div>
-          <div className="encode-note">
-            {view === "tree"
-              ? trace
-                ? "glow ∝ revisits"
-                : "static map"
-              : trace
-                ? "height ∝ depth × revisits"
-                : "height ∝ lines"}
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 });

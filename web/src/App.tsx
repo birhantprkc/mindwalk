@@ -1,6 +1,18 @@
 import { PanelLeftOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { describeError, getRepoMap, getSessionSnapshot, listSessions } from "./api/client";
+import {
+  describeError,
+  getRepoMap,
+  getSessionReport,
+  getSessionSnapshot,
+  listSessions,
+  startSessionAnalyze
+} from "./api/client";
+import { Crosshair, Sparkles, Mountain, TreePine } from "lucide-react";
+import type { JudgeChoice, ReportStatus } from "./types";
+import { Dock, type PanelDescriptor } from "./ui/Dock";
+import { ReportPanel } from "./ui/ReportPanel";
+import { ViewPanel } from "./ui/ViewPanel";
 import { PlaybackEngine } from "./playback/reducer";
 import { downloadBlob, recordingSupported, recordPlayback } from "./playback/recorder";
 import { CityScene } from "./scene/CityScene";
@@ -13,6 +25,21 @@ import { SessionRail } from "./ui/SessionRail";
 import { toggleRailShortcut } from "./ui/shortcuts";
 import { Timeline } from "./ui/Timeline";
 import "./styles.css";
+
+function evaluateHint(badge: "running" | "done" | "stale" | "failed" | null): string {
+  switch (badge) {
+    case "running":
+      return "The judge is reading the trace — about a minute";
+    case "done":
+      return "Evaluation ready";
+    case "stale":
+      return "Evaluation ready, but the session has grown since";
+    case "failed":
+      return "The last evaluation failed — open to retry";
+    default:
+      return "Evaluate this session with your local agent CLI";
+  }
+}
 
 export default function App() {
   const {
@@ -51,6 +78,11 @@ export default function App() {
   activeSessionKeyRef.current = activeSessionKey;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [openSheet, setOpenSheet] = useState<string | null>(null);
+  const [openPop, setOpenPop] = useState<string | null>(null);
+  const [reportStatus, setReportStatus] = useState<ReportStatus | undefined>();
+  const exportingRef = useRef(false);
+  exportingRef.current = exporting;
 
   // scenes hand up their live <canvas> so the video exporter can capture it;
   // stable identity keeps the scene mount effect from remounting on every render
@@ -153,14 +185,6 @@ export default function App() {
     window.open(url, "_blank", "noopener");
   }, []);
 
-  const refresh = useCallback(() => {
-    if (manualRefreshInFlight.current) return;
-    manualRefreshInFlight.current = true;
-    void scan(true).finally(() => {
-      manualRefreshInFlight.current = false;
-    });
-  }, [scan]);
-
   const selectSession = useCallback((key: string) => {
     activeSessionKeyRef.current = key;
     setActiveSession(key);
@@ -203,12 +227,150 @@ export default function App() {
   const collapseRail = useCallback(() => setRailCollapsed(true), [setRailCollapsed]);
   const expandRail = useCallback(() => setRailCollapsed(false), [setRailCollapsed]);
 
+  // --- session evaluation: fetched on session switch, polled while the judge
+  // runs; the judge itself only ever starts from the explicit button press
+  const refreshReport = useCallback(async (key: string) => {
+    try {
+      const status = await getSessionReport(key);
+      if (activeSessionKeyRef.current === key) setReportStatus(status);
+    } catch {
+      // not worth a toast: the status stays undefined, the panel keeps its
+      // "checking" state, and the unknown-status retry effect below tries
+      // again until the server answers
+    }
+  }, []);
+
+  useEffect(() => {
+    setOpenSheet(null);
+    setOpenPop(null);
+    setReportStatus(undefined);
+    if (activeSessionKey && !mapOnly) void refreshReport(activeSessionKey);
+  }, [activeSessionKey, mapOnly, refreshReport]);
+
+  // refreshes the rail's evaluation badges without disturbing selection —
+  // scan() owns selection fallback, this only swaps the list data
+  const refreshSessionList = useCallback(async () => {
+    try {
+      setSessions(await listSessions());
+    } catch {
+      // badge refresh is best-effort; the next scan will catch up
+    }
+  }, [setSessions]);
+
+  // manual rescan: the active key usually survives it, so the report status
+  // must be refetched explicitly — it may have gone stale or finished while
+  // we weren't polling
+  const refresh = useCallback(() => {
+    if (manualRefreshInFlight.current) return;
+    manualRefreshInFlight.current = true;
+    const key = activeSessionKeyRef.current;
+    if (key && !mapOnly) void refreshReport(key);
+    void scan(true).finally(() => {
+      manualRefreshInFlight.current = false;
+    });
+  }, [scan, refreshReport, mapOnly]);
+
+  useEffect(() => {
+    if (reportStatus?.state !== "running" || !activeSessionKey) return;
+    const timer = setInterval(() => {
+      void refreshReport(activeSessionKey);
+      void refreshSessionList();
+    }, 2500);
+    return () => {
+      clearInterval(timer);
+      // one more list pass so the rail badge leaves "evaluating" promptly
+      void refreshSessionList();
+    };
+  }, [reportStatus?.state, activeSessionKey, refreshReport, refreshSessionList]);
+
+  // while the report status is unknown (first request failed or still on its
+  // way), keep asking — otherwise a single dropped request would pin the
+  // panel to "checking" until a session switch or reload
+  useEffect(() => {
+    if (reportStatus !== undefined || !activeSessionKey || mapOnly) return;
+    const timer = setInterval(() => void refreshReport(activeSessionKey), 5000);
+    return () => clearInterval(timer);
+  }, [reportStatus === undefined, activeSessionKey, mapOnly, refreshReport]);
+
+  // a judge can be running for a session other than the active one; keep the
+  // rail badges honest by polling the list until every run finishes (the
+  // running-state effect above already polls while the active session runs)
+  const anyEvaluating = useMemo(() => sessions.some((s) => s.reportState === "running"), [sessions]);
+  useEffect(() => {
+    if (!anyEvaluating || reportStatus?.state === "running") return;
+    const timer = setInterval(() => void refreshSessionList(), 5000);
+    return () => clearInterval(timer);
+  }, [anyEvaluating, reportStatus?.state, refreshSessionList]);
+
+  const analyzeSession = useCallback(async (choice: JudgeChoice) => {
+    const key = activeSessionKeyRef.current;
+    if (!key) return;
+    try {
+      const status = await startSessionAnalyze(key, choice);
+      if (activeSessionKeyRef.current === key) setReportStatus(status);
+      void refreshSessionList();
+    } catch (err) {
+      setError(describeError(err, "starting the evaluation"));
+    }
+  }, [setError, refreshSessionList]);
+
+  // selecting a file in the scene opens the inspect sheet; deselecting keeps
+  // whatever panel the user had open
+  const selectFile = useCallback(
+    (path: string | undefined) => {
+      setSelectedPath(path);
+      if (path) setOpenSheet("inspect");
+    },
+    [setSelectedPath]
+  );
+
+  const closeSheet = useCallback(() => setOpenSheet(null), []);
+  const closePop = useCallback(() => setOpenPop(null), []);
+
+  // sheets are exclusive (one full-height paper at a time); pops toggle
+  // independently so a view tweak never steals the open report
+  const togglePanel = useCallback((panel: PanelDescriptor) => {
+    if (panel.presentation === "sheet") {
+      setOpenSheet((current) => (current === panel.id ? null : panel.id));
+    } else {
+      setOpenPop((current) => (current === panel.id ? null : panel.id));
+    }
+  }, []);
+
+  // a finding jump moves the playhead and focuses the evidence's file so the
+  // claim is visible in the scene, not just in the panel — without stealing
+  // the dock away from the evaluation tab
+  const jumpToEvidence = useCallback(
+    (seq: number) => {
+      setCurrentSeq(seq);
+      const event = trace?.events[seq];
+      const path = event?.targets.find((target) => target.path)?.path;
+      if (path) setSelectedPath(path);
+    },
+    [trace, setCurrentSeq, setSelectedPath]
+  );
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "b" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       e.preventDefault();
       const store = useAppStore.getState();
       store.setRailCollapsed(!store.railCollapsed);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // V cycles the scene view without opening the view pop; locked during
+  // export because switching scenes would swap the recorded canvas
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "v" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (exportingRef.current) return;
+      const store = useAppStore.getState();
+      store.setView(store.view === "tree" ? "terrain" : "tree");
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -223,6 +385,22 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const reportBadge = useMemo(() => {
+    if (reportStatus?.state === "running") return "running" as const;
+    if (reportStatus?.state === "failed") return "failed" as const;
+    if (reportStatus?.state === "done") return reportStatus.stale ? ("stale" as const) : ("done" as const);
+    return null;
+  }, [reportStatus]);
+
+  const viewNote =
+    view === "tree"
+      ? trace
+        ? "glow ∝ revisits"
+        : "static map"
+      : trace
+        ? "height ∝ depth × revisits"
+        : "height ∝ lines";
 
   const engine = useMemo(() => new PlaybackEngine(trace, city), [trace, city]);
   const playback = useMemo(() => engine.snapshotAt(currentSeq), [engine, currentSeq]);
@@ -275,7 +453,9 @@ export default function App() {
           onHarnessFilterChange={setHarnessFilter}
           onCollapse={collapseRail}
           onOpenMap={openMap}
+          activeRepo={trace?.session.cwd}
           locked={exporting}
+          activeReportState={reportStatus === undefined ? undefined : reportBadge}
         />
       )}
       <section className="stage">
@@ -295,7 +475,7 @@ export default function App() {
               city={city}
               playback={playback}
               selectedPath={selectedPath}
-              onSelect={setSelectedPath}
+              onSelect={selectFile}
               onCanvasReady={handleCanvasReady}
             />
           ) : (
@@ -303,7 +483,7 @@ export default function App() {
               city={city}
               playback={playback}
               selectedPath={selectedPath}
-              onSelect={setSelectedPath}
+              onSelect={selectFile}
               onCanvasReady={handleCanvasReady}
               locHeights={mapOnly}
             />
@@ -311,23 +491,67 @@ export default function App() {
           <Hud
             trace={trace}
             city={city}
-            view={view}
             editedNow={touchCounts.edited}
             readNow={touchCounts.read}
             seenNow={touchCounts.seen}
             churn={churn}
-            onViewChange={setView}
-            onSelectFile={setSelectedPath}
-            onOpenMap={openMap}
-            locked={exporting}
+            onSelectFile={selectFile}
           />
-          {selectedFile ? (
-            <Inspector
-              file={selectedFile}
-              touch={playback.touchByPath.get(selectedFile.path)}
-              history={playback.historyByPath.get(selectedFile.path) ?? []}
-              onClose={() => setSelectedPath(undefined)}
-              onJumpTo={setCurrentSeq}
+          {city ? (
+            <Dock
+              panels={[
+                {
+                  id: "view",
+                  icon: view === "tree" ? TreePine : Mountain,
+                  hint: `Scene view: ${view} — click to change, or press V`,
+                  section: "scene",
+                  presentation: "pop",
+                  render: () => (
+                    <ViewPanel view={view} onViewChange={setView} note={viewNote} locked={exporting} />
+                  )
+                },
+                {
+                  id: "inspect",
+                  icon: Crosshair,
+                  hint: "Inspect the selected file",
+                  section: "session",
+                  presentation: "sheet",
+                  render: () => (
+                    <Inspector
+                      file={selectedFile}
+                      touch={selectedFile ? playback.touchByPath.get(selectedFile.path) : undefined}
+                      history={selectedFile ? (playback.historyByPath.get(selectedFile.path) ?? []) : []}
+                      onClose={closeSheet}
+                      onJumpTo={setCurrentSeq}
+                    />
+                  )
+                },
+                ...(!mapOnly && trace
+                  ? [
+                      {
+                        id: "evaluate",
+                        icon: Sparkles,
+                        hint: evaluateHint(reportBadge),
+                        section: "session",
+                        presentation: "sheet",
+                        badge: reportBadge,
+                        render: () => (
+                          <ReportPanel
+                            status={reportStatus}
+                            analyzing={reportStatus?.state === "running"}
+                            onAnalyze={(choice) => void analyzeSession(choice)}
+                            onClose={closeSheet}
+                            onJumpTo={jumpToEvidence}
+                          />
+                        )
+                      } satisfies PanelDescriptor
+                    ]
+                  : [])
+              ]}
+              openSheet={openSheet}
+              openPop={openPop}
+              onToggle={togglePanel}
+              onClosePop={closePop}
             />
           ) : null}
           {!mapOnly && !loading && sessions.length === 0 ? (

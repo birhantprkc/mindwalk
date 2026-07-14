@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +25,7 @@ import (
 	"github.com/cosmtrek/mindwalk/internal/adapter/claudecode"
 	"github.com/cosmtrek/mindwalk/internal/adapter/codex"
 	"github.com/cosmtrek/mindwalk/internal/citymap"
+	"github.com/cosmtrek/mindwalk/internal/judge"
 	"github.com/cosmtrek/mindwalk/internal/model"
 )
 
@@ -56,6 +59,9 @@ type Server struct {
 	summaries map[string]summaryCacheEntry
 	repoMaps  map[string]repoMapEntry
 	repoMapMu sync.Mutex
+
+	analyze     analyzeState
+	reportCache judge.Cache
 }
 
 type repoMapEntry struct {
@@ -104,6 +110,9 @@ func New(cfg Config) *Server {
 		inflight:  map[string]*inflightLoad{},
 		summaries: map[string]summaryCacheEntry{},
 		repoMaps:  map[string]repoMapEntry{},
+
+		analyze:     analyzeState{jobs: map[string]*analyzeJob{}},
+		reportCache: judge.Cache{Dir: judge.DefaultCacheDir()},
 	}
 }
 
@@ -153,7 +162,18 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, sessions)
+	// annotate each session with its evaluation state so the rail can show
+	// running/finished badges without per-session report requests
+	items := make([]sessionListItem, len(sessions))
+	for i, meta := range sessions {
+		items[i] = sessionListItem{SessionMeta: meta, ReportState: s.reportStateFor(meta)}
+	}
+	writeJSON(w, items)
+}
+
+type sessionListItem struct {
+	model.SessionMeta
+	ReportState string `json:"reportState,omitempty"`
 }
 
 func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +208,10 @@ func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, city)
+	case "report":
+		s.handleSessionReport(w, r, selector)
+	case "analyze":
+		s.handleSessionAnalyze(w, r, selector)
 	default:
 		http.NotFound(w, r)
 	}
@@ -506,27 +530,39 @@ func (s *Server) traceAndMap(selector string) (*model.Trace, *model.CityMap, err
 		// Keep the pre-parse fingerprint. If the active session grows during
 		// parsing, the next request will see a mismatch and reload it instead
 		// of treating the partial snapshot as current.
-		trace, city, err := s.loadTraceAndMap(meta)
+		s.runInflight(key, load, meta, fingerprint)
+		return load.trace, load.city, load.err
+	}
+}
 
+// runInflight executes the shared load for key and publishes the result on
+// load. The finalize step — cache the result, drop the inflight entry, close
+// load.done — runs in a defer so a panicking loader cannot skip it. Without
+// that, net/http's per-connection recover would swallow the panic while the
+// inflight entry stayed registered, and every later request for the key
+// would block forever on a done channel nothing closes.
+func (s *Server) runInflight(key string, load *inflightLoad, meta model.SessionMeta, fingerprint fileFingerprint) {
+	defer func() {
+		if r := recover(); r != nil {
+			load.trace, load.city = nil, nil
+			load.err = fmt.Errorf("load session %s: %v", key, r)
+			log.Printf("mindwalk: panic loading session %s: %v\n%s", key, r, debug.Stack())
+		}
 		s.mu.Lock()
-		if err == nil {
-			s.traces[key] = trace
-			s.maps[key] = city
+		if load.err == nil {
+			s.traces[key] = load.trace
+			s.maps[key] = load.city
 			s.cacheFile[key] = fingerprint
 			now := time.Now()
 			s.cacheAt[key] = now
 			s.cacheUsed[key] = now
 			s.evictTraceCacheLocked()
 		}
-		load.trace = trace
-		load.city = city
-		load.err = err
 		delete(s.inflight, key)
 		close(load.done)
 		s.mu.Unlock()
-
-		return trace, city, err
-	}
+	}()
+	load.trace, load.city, load.err = s.loadTraceAndMap(meta)
 }
 
 func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.CityMap, error) {

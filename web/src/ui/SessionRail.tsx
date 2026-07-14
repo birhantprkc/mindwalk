@@ -1,5 +1,5 @@
 import { Eye, EyeOff, FolderOpen, PanelLeftClose, RefreshCw, Search } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { sessionVisible } from "../state/filters";
 import { LogoMark } from "./LogoMark";
 import { toggleRailShortcut } from "./shortcuts";
@@ -19,9 +19,14 @@ interface SessionRailProps {
   onCollapse: () => void;
   // opens the static full-repo map for a repo path in a new tab
   onOpenMap: (repo: string) => void;
+  // the active session's repo, offered as the popover's one-click choice
+  activeRepo?: string;
   // while a video export records, session switching is locked so it can't swap
   // the canvas or playhead out from under the recorder
   locked?: boolean;
+  // the panel's authoritative (digest-based) status for the active session;
+  // undefined = unknown (keep the list's approximate badge), null = no report
+  activeReportState?: "running" | "done" | "stale" | "failed" | null;
 }
 
 // memo: the app re-renders every playback tick; the rail's props only change
@@ -39,10 +44,31 @@ export const SessionRail = memo(function SessionRail({
   onHarnessFilterChange,
   onCollapse,
   onOpenMap,
-  locked = false
+  activeRepo,
+  locked = false,
+  activeReportState
 }: SessionRailProps) {
   const [query, setQuery] = useState("");
   const [repoPath, setRepoPath] = useState("");
+  const [mapOpen, setMapOpen] = useState(false);
+  const mapPopRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!mapOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (mapPopRef.current?.contains(event.target as Node)) return;
+      setMapOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMapOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mapOpen]);
   const harnesses = useMemo(() => [...new Set(sessions.map((s) => s.harness))].sort(), [sessions]);
   const emptyCount = useMemo(() => sessions.filter((s) => s.eventCount === 0).length, [sessions]);
   // a persisted filter can name a harness with no sessions this scan; treating
@@ -69,6 +95,69 @@ export const SessionRail = memo(function SessionRail({
           </span>
         </h1>
         <div className="rail-head-actions">
+          <div className="rail-map" ref={mapPopRef}>
+            <button
+              className="icon-btn"
+              onClick={() => setMapOpen((open) => !open)}
+              aria-expanded={mapOpen}
+              title="Open a repository map"
+              aria-label="Open a repository map"
+            >
+              <FolderOpen size={15} />
+            </button>
+            {mapOpen ? (
+              <div className="rail-map-pop">
+                {activeRepo ? (
+                  <button
+                    className="rail-map-primary"
+                    onClick={() => {
+                      onOpenMap(activeRepo);
+                      setMapOpen(false);
+                    }}
+                    title={`Open the map of ${activeRepo}`}
+                  >
+                    <FolderOpen size={14} aria-hidden />
+                    <span className="rail-map-primary-text">
+                      <span className="rail-map-primary-name">{repoBasename(activeRepo)}</span>
+                      {/* the leading LRM pins the path's neutral "/" runs to
+                          LTR order inside the RTL ellipsis-at-start trick */}
+                      <span className="rail-map-primary-path">{"\u200E" + activeRepo}</span>
+                    </span>
+                  </button>
+                ) : null}
+                {activeRepo ? (
+                  <div className="rail-map-divider" aria-hidden>
+                    <span>or open any repository</span>
+                  </div>
+                ) : (
+                  <p className="rail-map-label">Open a repository map</p>
+                )}
+                <form
+                  className="rail-map-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const path = repoPath.trim();
+                    if (path) {
+                      onOpenMap(path);
+                      setMapOpen(false);
+                    }
+                  }}
+                >
+                  <input
+                    type="text"
+                    className="rail-map-input"
+                    placeholder="/path/to/repo"
+                    value={repoPath}
+                    onChange={(e) => setRepoPath(e.currentTarget.value)}
+                    spellCheck={false}
+                  />
+                  <button type="submit" className="rail-map-go" disabled={repoPath.trim() === ""}>
+                    Open
+                  </button>
+                </form>
+              </div>
+            ) : null}
+          </div>
           <button className="icon-btn" onClick={onRefresh} title="Rescan sessions" aria-label="Rescan sessions">
             <RefreshCw size={15} />
           </button>
@@ -142,13 +231,29 @@ export const SessionRail = memo(function SessionRail({
           >
             <span className="session-title">{session.title || session.id}</span>
             <span className="session-meta">
-              <span className={`harness-dot ${harnessClass(session.harness)}`} aria-hidden />
               <span className="session-meta-text">
                 {harnessLabel(session.harness)} · {session.eventCount}{" "}
                 {session.eventCount === 1 ? "call" : "calls"}
                 {session.gitBranch ? ` · ${session.gitBranch}` : ""}
                 {session.endedAt ? ` · ${shortDate(session.endedAt)}` : ""}
               </span>
+              {(() => {
+                // the panel's digest-based status outranks the list's cheap
+                // event-count grading for the active session
+                const evalState =
+                  session.key === activeKey && activeReportState !== undefined
+                    ? activeReportState
+                    : session.reportState;
+                return evalState ? (
+                  <span
+                    className={`rail-eval rail-eval-${evalState}`}
+                    title={evalHint(evalState)}
+                    aria-label={evalHint(evalState)}
+                  >
+                    {evalState === "running" ? "evaluating" : ""}
+                  </span>
+                ) : null;
+              })()}
             </span>
           </button>
         ))}
@@ -158,33 +263,6 @@ export const SessionRail = memo(function SessionRail({
           </p>
         ) : null}
       </div>
-      <form
-        className="rail-open"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const path = repoPath.trim();
-          if (path) onOpenMap(path);
-        }}
-      >
-        <label className="rail-open-label" htmlFor="rail-open-input">
-          Open a repository map
-        </label>
-        <div className="rail-open-row">
-          <input
-            id="rail-open-input"
-            type="text"
-            className="rail-open-input"
-            placeholder="/path/to/repo"
-            value={repoPath}
-            onChange={(e) => setRepoPath(e.currentTarget.value)}
-            spellCheck={false}
-          />
-          <button type="submit" className="rail-open-btn" disabled={repoPath.trim() === ""} title="Open repository map">
-            <FolderOpen size={13} aria-hidden />
-            <span>Open…</span>
-          </button>
-        </div>
-      </form>
       <div className="rail-foot">
         {shown.length === sessions.length
           ? `${sessions.length} session${sessions.length === 1 ? "" : "s"}`
@@ -194,23 +272,30 @@ export const SessionRail = memo(function SessionRail({
   );
 });
 
+function repoBasename(path: string): string {
+  const clean = path.replace(/\/+$/, "");
+  return clean.slice(clean.lastIndexOf("/") + 1) || clean;
+}
+
+function evalHint(state: "running" | "done" | "stale" | "failed"): string {
+  switch (state) {
+    case "running":
+      return "Evaluation in progress";
+    case "done":
+      return "Evaluation ready";
+    case "stale":
+      return "Evaluation ready, but the session has grown since";
+    case "failed":
+      return "Last evaluation failed";
+  }
+}
+
 function harnessLabel(harness: string): string {
   switch (harness) {
     case "claude-code":
       return "claude";
     default:
       return harness;
-  }
-}
-
-function harnessClass(harness: string): string {
-  switch (harness) {
-    case "claude-code":
-      return "claude";
-    case "codex":
-      return "codex";
-    default:
-      return "other";
   }
 }
 

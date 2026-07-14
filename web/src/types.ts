@@ -28,6 +28,10 @@ export interface SessionMeta {
   startedAt?: string;
   endedAt?: string;
   eventCount: number;
+  /** user-turn count; with eventCount, the badge's cheap staleness signal */
+  userTurns?: number;
+  /** evaluation state for the rail badge; absent when never evaluated */
+  reportState?: "running" | "done" | "stale" | "failed";
 }
 
 export interface Rect {
@@ -155,6 +159,71 @@ export interface Observability {
 }
 
 export type MetricObservability = "exact" | "estimated" | "unavailable";
+
+/** LLM-assisted evaluation of one session; verdicts are server-derived
+ * from finding severities, never decided by the judge itself */
+export interface Report {
+  version: number;
+  session: {
+    id: string;
+    harness: string;
+    model?: string;
+    /** event count the report was generated from — the staleness signal */
+    eventCount: number;
+  };
+  judge: {
+    cli: string;
+    /** the LLM that actually judged, as reported by the CLI itself */
+    model?: string;
+    promptVersion: number;
+    generatedAt: string;
+  };
+  taskSummary: string;
+  dimensions: ReportDimension[];
+  notableMoments?: ReportMoment[];
+  narrative: string;
+}
+
+export type Verdict = "good" | "warning" | "problem" | "insufficient-data";
+export type Severity = "info" | "warning" | "problem";
+export type DimensionName = "exploration" | "scope" | "wandering" | "verification";
+
+export interface ReportDimension {
+  name: DimensionName;
+  verdict: Verdict;
+  findings: ReportFinding[];
+}
+
+export interface ReportFinding {
+  claim: string;
+  severity: Severity;
+  evidenceSeqs?: number[];
+}
+
+export interface ReportMoment {
+  seq: number;
+  note: string;
+}
+
+export interface ReportStatus {
+  state: "none" | "running" | "done" | "failed";
+  /** done, but generated from fewer events than the trace now has */
+  stale: boolean;
+  report?: Report;
+  error?: string;
+  judgeAvailable: boolean;
+  /** default judge (first available) */
+  judgeCli?: string;
+  /** every installed judge CLI, preference order first */
+  judgeClis?: string[];
+}
+
+/** the panel's judge selection, sent with the analyze request */
+export interface JudgeChoice {
+  cli: string;
+  /** empty string keeps the CLI's default model */
+  model: string;
+}
 
 export interface ActionCounts {
   search: number;

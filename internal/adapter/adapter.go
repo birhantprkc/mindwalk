@@ -48,6 +48,44 @@ func SessionKey(harness, path string) string {
 	return fmt.Sprintf("%s-%x", harness, sum[:12])
 }
 
+// userMessageNoteLimit bounds the text stored on user-message marks; the note
+// exists so downstream analysis can see the task wording, not to mirror the
+// full transcript.
+const userMessageNoteLimit = 2000
+
+// UserMessageNote normalizes user-message text for Mark.Note: trimmed and
+// truncated to a fixed rune budget, ellipsis marker included — the schema
+// promises the note never exceeds userMessageNoteLimit runes in total.
+func UserMessageNote(text string) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) <= userMessageNoteLimit {
+		return text
+	}
+	return string(runes[:userMessageNoteLimit-1]) + "…"
+}
+
+// InjectedUserMessage recognizes harness-injected text recorded as a user
+// message but not written by the user. Adapters drop these before they
+// become user-message marks — they would inflate user-turn stats, clutter
+// the timeline, and pose as the task in judge input.
+//
+// Injected wrappers observed in real logs (<system-reminder>,
+// <command-name>, <local-command-caveat>, <environment_context>,
+// <recommended_plugins>, <turn_aborted>, …) are complete markup envelopes:
+// the message starts with a tag and ends with one. That shape — rather than
+// a tag whitelist that new harness versions would outgrow, or a bare "<"
+// prefix that would swallow real tasks pasting HTML/JSX followed by a
+// question — is what marks a message as injected. Codex's AGENTS.md
+// instructions are the one non-markup injection.
+func InjectedUserMessage(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "# AGENTS.md instructions") {
+		return true
+	}
+	return strings.HasPrefix(text, "<") && strings.HasSuffix(text, ">")
+}
+
 func ReadJSONLines(r io.Reader, visit func([]byte)) error {
 	reader := bufio.NewReaderSize(r, 64*1024)
 	for {

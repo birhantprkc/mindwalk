@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/cosmtrek/mindwalk/internal/judge"
 	"github.com/cosmtrek/mindwalk/internal/model"
 )
 
@@ -91,7 +92,7 @@ func TestParseCodexSession(t *testing.T) {
 	if trace.Session.Title != "Codex demo trace" || trace.Session.Model != "gpt-5.5" {
 		t.Fatalf("session = %#v", trace.Session)
 	}
-	if len(trace.Marks) != 1 || trace.Marks[0].Type != "user-message" {
+	if len(trace.Marks) != 1 || trace.Marks[0].Type != "user-message" || trace.Marks[0].Note != "inspect" {
 		t.Fatalf("marks = %#v", trace.Marks)
 	}
 	if len(trace.Events) != 3 {
@@ -672,5 +673,96 @@ func writeJSONL(t *testing.T, path string, values ...any) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSummarizeMarksJudgeWorkdirAuxiliary(t *testing.T) {
+	workdir := judge.WorkDir()
+	if workdir == "" {
+		t.Skip("no home directory available")
+	}
+	dir := t.TempDir()
+	session := filepath.Join(dir, "rollout-2026-07-14T00-00-00-judge-run.jsonl")
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-14T00:00:00Z",
+			"type":      "session_meta",
+			"payload": map[string]any{
+				"id":         "judge-run",
+				"session_id": "judge-run",
+				"timestamp":  "2026-07-14T00:00:00Z",
+				"cwd":        workdir,
+			},
+		},
+	)
+	adapter := Adapter{Dir: dir}
+	meta, err := adapter.Summarize(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Auxiliary {
+		t.Fatalf("session recorded in judge workdir %s should be auxiliary", workdir)
+	}
+	metas, err := adapter.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range metas {
+		if m.ID == "judge-run" {
+			t.Fatal("judge session leaked into ListSessions")
+		}
+	}
+}
+
+func TestParseSkipsInjectedUserMessages(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, "rollout-2026-07-14T00-00-01-injected.jsonl")
+	userMessage := func(text string) map[string]any {
+		return map[string]any{
+			"timestamp": "2026-07-14T00:00:01Z",
+			"type":      "response_item",
+			"payload": map[string]any{
+				"type":    "message",
+				"role":    "user",
+				"content": []any{map[string]any{"type": "input_text", "text": text}},
+			},
+		}
+	}
+	writeJSONL(t, session,
+		map[string]any{
+			"timestamp": "2026-07-14T00:00:00Z",
+			"type":      "session_meta",
+			"payload":   map[string]any{"id": "injected", "session_id": "injected", "timestamp": "2026-07-14T00:00:00Z", "cwd": "/repo"},
+		},
+		userMessage("# AGENTS.md instructions for /repo\n\nproject rules"),
+		userMessage("<environment_context>shell: zsh</environment_context>"),
+		userMessage("the real task"),
+	)
+	trace, err := (Adapter{Dir: dir}).Parse(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for _, mark := range trace.Marks {
+		if mark.Type == "user-message" {
+			notes = append(notes, mark.Note)
+		}
+	}
+	// Injected AGENTS.md and markup wrappers stay out of marks — they would
+	// inflate userTurns and pose as the task in judge input.
+	if len(notes) != 1 || notes[0] != "the real task" {
+		t.Fatalf("user-message notes = %#v", notes)
+	}
+	if trace.Stats.UserTurns != 1 {
+		t.Fatalf("userTurns = %d, want 1", trace.Stats.UserTurns)
+	}
+	// Summarize must count the same turns as the parse, or the rail badge's
+	// staleness check would disagree with the report.
+	meta, err := (Adapter{Dir: dir}).Summarize(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.UserTurns != 1 {
+		t.Fatalf("summarized userTurns = %d, want 1", meta.UserTurns)
 	}
 }

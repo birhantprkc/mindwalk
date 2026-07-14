@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cosmtrek/mindwalk/internal/adapter"
+	"github.com/cosmtrek/mindwalk/internal/judge"
 	"github.com/cosmtrek/mindwalk/internal/model"
 )
 
@@ -132,11 +133,26 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 					seenCalls[callID] = true
 					meta.EventCount++
 				}
+				// only message items pay the full decode; the count must
+				// mirror Parse's user-message mark filter
+				if payload.Type == "message" {
+					var msg responseItemPayload
+					if json.Unmarshal(line.Payload, &msg) == nil && msg.Role == "user" && msg.Content.HasText() {
+						if !adapter.InjectedUserMessage(msg.Content.Text()) {
+							meta.UserTurns++
+						}
+					}
+				}
 			}
 		case "event_msg":
 			recognized = true
 		case "message":
 			recognized = true
+			if line.Role == "user" && line.Content.HasText() {
+				if !adapter.InjectedUserMessage(line.Content.Text()) {
+					meta.UserTurns++
+				}
+			}
 		case "":
 			if line.ID != "" {
 				recognized = true
@@ -144,6 +160,12 @@ func (a Adapter) Summarize(path string) (model.SessionMeta, error) {
 			}
 		}
 	})
+	if judge.IsWorkDir(meta.Cwd) {
+		// Sessions recorded in the judge workdir are mindwalk's own judge
+		// runs (codex cannot disable session persistence), not user coding
+		// sessions; auxiliary keeps them out of every listing.
+		meta.Auxiliary = true
+	}
 	if meta.Title == "" {
 		meta.Title = a.titleFor(meta.ID)
 	}
@@ -235,13 +257,25 @@ func (a Adapter) Parse(path string) (*model.Trace, error) {
 			}
 			if payload.Type == "message" {
 				if payload.Role == "user" && payload.Content.HasText() {
-					trace.Marks = append(trace.Marks, model.Mark{Seq: len(callOrder), Type: "user-message"})
+					if text := payload.Content.Text(); !adapter.InjectedUserMessage(text) {
+						trace.Marks = append(trace.Marks, model.Mark{
+							Seq:  len(callOrder),
+							Type: "user-message",
+							Note: adapter.UserMessageNote(text),
+						})
+					}
 				}
 			}
 		case "message":
 			recognized = true
 			if line.Role == "user" && line.Content.HasText() {
-				trace.Marks = append(trace.Marks, model.Mark{Seq: len(callOrder), Type: "user-message"})
+				if text := line.Content.Text(); !adapter.InjectedUserMessage(text) {
+					trace.Marks = append(trace.Marks, model.Mark{
+						Seq:  len(callOrder),
+						Type: "user-message",
+						Note: adapter.UserMessageNote(text),
+					})
+				}
 			}
 		case "event_msg":
 			recognized = true
@@ -399,6 +433,16 @@ func (c *codexContentList) UnmarshalJSON(data []byte) error {
 	}
 	c.Items = items
 	return nil
+}
+
+func (c codexContentList) Text() string {
+	var parts []string
+	for _, item := range c.Items {
+		if strings.TrimSpace(item.Text) != "" {
+			parts = append(parts, strings.TrimSpace(item.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (c codexContentList) HasText() bool {

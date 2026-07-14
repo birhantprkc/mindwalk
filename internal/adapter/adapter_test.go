@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cosmtrek/mindwalk/internal/model"
@@ -20,6 +21,49 @@ func TestSessionKeyIsStableAndSourceSpecific(t *testing.T) {
 	}
 	if other := SessionKey("codex", path+".copy"); other == first {
 		t.Fatalf("SessionKey ignored path: %q", other)
+	}
+}
+
+func TestUserMessageNoteStaysWithinRuneBudget(t *testing.T) {
+	long := strings.Repeat("字", userMessageNoteLimit+50)
+	note := UserMessageNote(long)
+	if got := len([]rune(note)); got != userMessageNoteLimit {
+		t.Fatalf("truncated note is %d runes, want %d (ellipsis must fit the budget)", got, userMessageNoteLimit)
+	}
+	if !strings.HasSuffix(note, "…") {
+		t.Fatalf("truncated note missing ellipsis marker: %q", note[len(note)-12:])
+	}
+	exact := strings.Repeat("a", userMessageNoteLimit)
+	if UserMessageNote(exact) != exact {
+		t.Fatal("text at the limit must pass through untouched")
+	}
+}
+
+func TestInjectedUserMessageShape(t *testing.T) {
+	injected := []string{
+		"<system-reminder>context</system-reminder>",
+		"<command-name>/review</command-name>",
+		"<local-command-caveat>Caveat: …</local-command-caveat>",
+		"<environment_context>\nshell: zsh\n</environment_context>",
+		"<turn_aborted>true</turn_aborted>",
+		"# AGENTS.md instructions for /repo\n\nrules",
+	}
+	for _, text := range injected {
+		if !InjectedUserMessage(text) {
+			t.Fatalf("should be injected: %q", text)
+		}
+	}
+	// Real tasks that merely start with markup must survive.
+	genuine := []string{
+		"fix the login bug",
+		"<div class=\"card\"> 这个组件为什么不居中",
+		"<Button onClick={…}/> renders twice, why",
+		"# AGENTS 文件怎么写",
+	}
+	for _, text := range genuine {
+		if InjectedUserMessage(text) {
+			t.Fatalf("real task misclassified as injected: %q", text)
+		}
 	}
 }
 

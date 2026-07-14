@@ -19,7 +19,11 @@ Draw the repository as a night map, and play the session back as light moving
 through it: where the agent searched, read, and edited, the map glows —
 everything else stays dark. The agent's understanding of the task becomes a
 shape you can see at a glance. One Go binary reads Claude Code and Codex
-session logs, fully local; no session data leaves your machine.
+session logs, fully local; viewing sends nothing anywhere. The one exception
+is the optional session evaluation: when you explicitly run it, a summary of
+that session (task wording, file paths, event digests) is sent to the model
+behind your own `claude` or `codex` CLI — see
+[Session evaluation](#session-evaluation).
 
 ## Quick start
 
@@ -42,6 +46,8 @@ mindwalk serve [--port N] [--no-open] [--claude-dir DIR] [--codex-dir DIR]
 mindwalk open [--no-open] <session.jsonl>   open one specific session
 mindwalk build <repo> [-o out]              write the repository citymap JSON
 mindwalk trace <session> [-o out]           write the normalized trace JSON
+mindwalk analyze <session> [--judge claude|codex] [--model name]
+                                            evaluate one session (see below)
 ```
 
 ## Reading the picture
@@ -60,23 +66,47 @@ mindwalk trace <session> [-o out]           write the normalized trace JSON
   `›` user turns; every mark is a click-to-jump target.
 - **Inspector** — click a file to pin its visit history; click a visit row to
   jump the playhead to that moment.
+- **Evaluate** — ask a local agent CLI to judge the session's trajectory;
+  session rows carry the evaluation state as a quiet badge. See
+  [Session evaluation](#session-evaluation).
 
 ![the same session on the terrain view](assets/screenshot-terrain.png)
 
 Keyboard: `Space` play/pause · `←`/`→` step (`⇧` ×10) · `Home`/`End` ends ·
 `S` speed · `E` next edit · `X` next error · `M` next mark · `⌘B` session rail.
 
+## Session evaluation
+
+The evaluate panel (and `mindwalk analyze`) asks a local agent CLI to judge
+how the session went — exploration, scope, wandering, verification — with
+every finding anchored to timeline events you can click through to. Pick the
+judge (any installed CLI) and its model in the panel; the report records who
+actually judged.
+
+**What leaves your machine, and only when you ask:** evaluation runs your own
+`claude` or `codex` CLI, which sends that session's summary — the user
+messages' wording, file paths, and one-line event digests — to the model
+behind your account. Nothing is sent while viewing sessions, and no other
+session is included. The judge subprocess runs sealed: no tools, no MCP
+servers, no user or project settings, and no session persistence.
+
+Reports are cached in `~/.mindwalk/reports`, one per session; a report goes
+stale (never auto-reruns) when the session's content changes.
+
 ## Under the hood
 
-Two artifacts, kept deliberately separate:
+Three artifacts, kept deliberately separate:
 
 1. a **trace** — the session log normalized into an ordered stream of
    file-touch events (`internal/adapter`, one adapter per agent format);
 2. a **citymap** — a deterministic layout of the repository
    (`internal/citymap`); the same tree always produces the same map, so
-   replays are comparable across sessions.
+   replays are comparable across sessions;
+3. a **report** — an LLM judge's evidence-anchored findings about one
+   session (`internal/judge`); the judge only contributes findings, verdicts
+   are always rolled up mechanically, so reports stay comparable too.
 
-A local Go server (`internal/server`) joins the two and serves the
+A local Go server (`internal/server`) joins them and serves the
 React/Three.js frontend (`web`). `schema/` mirrors the exported JSON contracts.
 
 ## Contributing
@@ -93,11 +123,12 @@ make build   # regenerate embedded assets and bin/mindwalk
 Ground rules (see [AGENTS.md](AGENTS.md) for the full architecture notes):
 
 - Keep the boundaries: adapters don't know about rendering, citymap generation
-  doesn't depend on playback, the server just connects the two.
+  doesn't depend on playback, the judge reads only the normalized trace, and
+  the server just connects the pieces.
 - Keep Go code `gofmt`-ed; never hand-edit `internal/server/static` —
   regenerate it with `make build`.
-- When trace or citymap JSON shapes change, update `schema/` and the relevant
-  tests in the same change.
+- When trace, citymap, or report JSON shapes change, update `schema/` and the
+  relevant tests in the same change.
 
 ## License
 
