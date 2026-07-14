@@ -130,6 +130,16 @@ Ground rules (see [AGENTS.md](AGENTS.md) for the full architecture notes):
 - When trace, citymap, or report JSON shapes change, update `schema/` and the
   relevant tests in the same change.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=cosmtrek%2Fmindwalk&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cosmtrek/mindwalk&type=date&theme=dark&legend=top-left&sealed_token=KfeBE15B50_VNEko1aJ171t9j-kcEwlcaJ_9UB5kbRuf2gqiMYJa_F2ojBtq3yrRqyLvQqfGigu2Eow_Kge0Fx1AIQu6SqA737nSQxkHfV0KQjOdMJD7Vy9BGjtay4VMdpjMruIWG3X28FBf8M4PE3-v4sMIZCOMBYZpF2E5iivAQTFUQL5Wz4KIoC09" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cosmtrek/mindwalk&type=date&legend=top-left&sealed_token=KfeBE15B50_VNEko1aJ171t9j-kcEwlcaJ_9UB5kbRuf2gqiMYJa_F2ojBtq3yrRqyLvQqfGigu2Eow_Kge0Fx1AIQu6SqA737nSQxkHfV0KQjOdMJD7Vy9BGjtay4VMdpjMruIWG3X28FBf8M4PE3-v4sMIZCOMBYZpF2E5iivAQTFUQL5Wz4KIoC09" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cosmtrek/mindwalk&type=date&legend=top-left&sealed_token=KfeBE15B50_VNEko1aJ171t9j-kcEwlcaJ_9UB5kbRuf2gqiMYJa_F2ojBtq3yrRqyLvQqfGigu2Eow_Kge0Fx1AIQu6SqA737nSQxkHfV0KQjOdMJD7Vy9BGjtay4VMdpjMruIWG3X28FBf8M4PE3-v4sMIZCOMBYZpF2E5iivAQTFUQL5Wz4KIoC09" />
+ </picture>
+</a>
+
 ## License
 
 [MIT](LICENSE) © 2026 Ricko Yu
