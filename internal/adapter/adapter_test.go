@@ -37,6 +37,21 @@ func TestBuildEventKeepsExecAggregatedAndFindsSingleCommandTarget(t *testing.T) 
 	}
 }
 
+func TestBuildEventExtractsApplyPatchFromExec(t *testing.T) {
+	root := t.TempDir()
+	writeAdapterTestFile(t, root, "src/main.go")
+	patch := "*** Begin Patch\n*** Update File: src/main.go\n@@\n-old\n+new\n*** End Patch"
+	source := `const patch = ` + jsonString(t, patch) + `; text(await tools.apply_patch(patch));`
+
+	event := buildExecEvent(root, map[string]any{"_raw": source})
+	if event.Tool != "exec" || event.Action != "edit" {
+		t.Fatalf("event = %#v", event)
+	}
+	if len(event.Targets) != 1 || event.Targets[0].Path != "src/main.go" || event.Targets[0].Touch != "edit" || event.Targets[0].Weak {
+		t.Fatalf("targets = %#v", event.Targets)
+	}
+}
+
 func TestBuildEventExtractsPromiseAllCommandTargets(t *testing.T) {
 	root := t.TempDir()
 	writeAdapterTestFile(t, root, "first/main.go")
