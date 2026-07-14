@@ -143,6 +143,9 @@ func actionFor(tool string, input map[string]any, result string) string {
 		}
 		return "exec"
 	case "exec":
+		if len(execPatchPaths(input)) > 0 {
+			return "edit"
+		}
 		commands := execCommands(input)
 		if len(commands) == 0 || !execHasOnlyStaticCommands(input, len(commands)) {
 			return "exec"
@@ -277,6 +280,9 @@ func targetsFor(cwd, tool string, input map[string]any, result string) ([]model.
 		for _, hit := range parsePathHits(result) {
 			add(hit.path, "hit", true, hit.lines, "")
 		}
+		for _, path := range execPatchPaths(input) {
+			add(path, "edit", false, nil, "")
+		}
 	case "apply_patch":
 		patch := firstString(input, "patch", "input", "_raw")
 		for _, path := range parsePatchPaths(patch) {
@@ -313,6 +319,7 @@ type execCommand struct {
 // literals assigned to cmd or workdir. It intentionally does not attempt to
 // parse arbitrary JavaScript expressions.
 var execStringFieldRe = regexp.MustCompile(`(?:^|[[:space:],{])(?:"(cmd|workdir)"|(cmd|workdir))\s*:\s*("(?:\\.|[^"\\])*")`)
+var execPatchAssignmentRe = regexp.MustCompile(`(?m)^[\t ]*(?:const|let|var)[\t ]+patch[\t ]*=[\t ]*("(?:\\.|[^"\\])*")[\t ]*;`)
 
 func execSource(input map[string]any) string {
 	for _, key := range []string{"_raw", "code", "script"} {
@@ -359,6 +366,27 @@ func execCommands(input map[string]any) []execCommand {
 	return commands
 }
 
+func execPatchPaths(input map[string]any) []string {
+	source := execSource(input)
+	if source == "" {
+		return nil
+	}
+	match := execPatchAssignmentRe.FindStringSubmatch(source)
+	if len(match) != 2 {
+		return nil
+	}
+	var patch string
+	if json.Unmarshal([]byte(match[1]), &patch) != nil {
+		return nil
+	}
+	for _, argument := range execToolArguments(source, "apply_patch") {
+		if strings.TrimSpace(argument) == "patch" {
+			return parsePatchPaths(patch)
+		}
+	}
+	return nil
+}
+
 func parseStaticExecCommand(argument string) (execCommand, bool) {
 	var command execCommand
 	ambiguousWorkdir := false
@@ -395,7 +423,11 @@ func parseStaticExecCommand(argument string) (execCommand, bool) {
 }
 
 func execCommandArguments(source string) []string {
-	const call = "tools.exec_command"
+	return execToolArguments(source, "exec_command")
+}
+
+func execToolArguments(source, tool string) []string {
+	call := "tools." + tool
 	var arguments []string
 	for i := 0; i < len(source); {
 		if next, ok := skipJSIgnored(source, i); ok {
