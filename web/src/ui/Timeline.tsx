@@ -1,4 +1,4 @@
-import { Loader, Pause, Play, RotateCcw, StepBack, StepForward, Video } from "lucide-react";
+import { Ellipsis, Loader, Pause, Play, RotateCcw, StepBack, StepForward, Video } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Action, Mark, Trace, TraceEvent } from "../types";
 
@@ -43,6 +43,8 @@ const STRIP_ACTIONS: Action[] = ["search", "read", "edit", "verify", "exec"];
 export function Timeline({ trace, currentSeq, onChange, onExport, exporting = false }: TimelineProps) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<Speed>(1);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const total = trace?.events.length ?? 0;
   const max = Math.max(0, total - 1);
   const seq = Math.min(currentSeq, max);
@@ -176,6 +178,26 @@ export function Timeline({ trace, currentSeq, onChange, onExport, exporting = fa
   // transport + scrubber are inert with no trace, or while an export owns the playhead
   const locked = total === 0 || exporting;
 
+  useEffect(() => {
+    if (locked) setMenuOpen(false);
+  }, [locked]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
   const buckets = useMemo<Bucket[]>(() => {
     if (!trace || total === 0) return [];
     const n = Math.min(BUCKETS, total);
@@ -228,66 +250,6 @@ export function Timeline({ trace, currentSeq, onChange, onExport, exporting = fa
   return (
     <footer className="deck">
       <div className="deck-main">
-        <div className="transport">
-          <button
-            className="icon-btn"
-            onClick={() => onChange(0)}
-            disabled={locked}
-            title="Restart (Home)"
-            aria-label="Restart playback"
-          >
-            <RotateCcw size={15} />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => step(-1)}
-            disabled={locked}
-            title="Step back (←)"
-            aria-label="Step back one event"
-          >
-            <StepBack size={15} />
-          </button>
-          <button
-            className="play-btn"
-            onClick={togglePlay}
-            disabled={locked}
-            title={playing ? "Pause (Space)" : "Play (Space)"}
-            aria-label={playing ? "Pause playback" : "Play playback"}
-          >
-            {playing ? <Pause size={15} /> : <Play size={15} />}
-            <span>{playing ? "Pause" : "Play"}</span>
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => step(1)}
-            disabled={locked}
-            title="Step forward (→)"
-            aria-label="Step forward one event"
-          >
-            <StepForward size={15} />
-          </button>
-          <button
-            className={speed === 1 ? "speed-btn" : "speed-btn engaged"}
-            onClick={cycleSpeed}
-            disabled={locked}
-            title="Cycle playback speed (S)"
-            aria-label={`Playback speed ${speed}x`}
-          >
-            {speed}×
-          </button>
-          {onExport ? (
-            <button
-              className={exporting ? "icon-btn recording" : "icon-btn"}
-              onClick={onExport}
-              disabled={total === 0 || exporting}
-              title={exporting ? "Recording video…" : "Export video"}
-              aria-label={exporting ? "Recording video" : "Export video"}
-            >
-              {exporting ? <Loader size={15} className="spin" /> : <Video size={15} />}
-            </button>
-          ) : null}
-        </div>
-
         <div className="strip">
           <div className="strip-marks" aria-hidden>
             {markGroups.map((group, i) => (
@@ -326,8 +288,105 @@ export function Timeline({ trace, currentSeq, onChange, onExport, exporting = fa
         </div>
 
         <div className="deck-pos">
-          <span className="deck-pos-count">{total > 0 ? `${seq + 1} / ${total}` : "0 / 0"}</span>
+          {/* reserve the widest count for this session ("599 / 599") so the
+              ticking digits never resize the strip beside them */}
+          <span className="deck-pos-count" style={{ minWidth: `${String(Math.max(total, 1)).length * 2 + 3}ch` }}>
+            {total > 0 ? `${seq + 1} / ${total}` : "0 / 0"}
+          </span>
           <span className="deck-pos-clock">{event?.ts ? clock(event.ts) : "—"}</span>
+        </div>
+
+        <div className="transport">
+          <button
+            className="icon-btn"
+            onClick={() => step(-1)}
+            disabled={locked}
+            title="Step back (←)"
+            aria-label="Step back one event"
+          >
+            <StepBack size={15} />
+          </button>
+          <button
+            className="play-btn"
+            onClick={togglePlay}
+            disabled={locked}
+            title={playing ? "Pause (Space)" : "Play (Space)"}
+            aria-label={playing ? "Pause playback" : "Play playback"}
+          >
+            {playing ? <Pause size={16} /> : <Play size={16} className="play-glyph" />}
+          </button>
+          <button
+            className="icon-btn"
+            onClick={() => step(1)}
+            disabled={locked}
+            title="Step forward (→)"
+            aria-label="Step forward one event"
+          >
+            <StepForward size={15} />
+          </button>
+          <div className="transport-more" ref={menuRef}>
+            {/* the trigger doubles as status: recording spinner while an export
+                runs, the engaged speed when it isn't 1× */}
+            <button
+              className={`icon-btn${exporting ? " recording" : ""}${menuOpen ? " open" : ""}`}
+              onClick={() => setMenuOpen((v) => !v)}
+              disabled={locked}
+              aria-haspopup="true"
+              aria-expanded={menuOpen}
+              title="More controls"
+              aria-label="More playback controls"
+            >
+              {exporting ? (
+                <Loader size={15} className="spin" />
+              ) : speed !== 1 ? (
+                <span className="more-speed">{speed}×</span>
+              ) : (
+                <Ellipsis size={15} />
+              )}
+            </button>
+            {menuOpen ? (
+              <div className="transport-pop">
+                <div className="pop-speed">
+                  <span className="pop-speed-label">Speed</span>
+                  <div className="pop-speed-chips" title="Cycle with S">
+                    {SPEEDS.map((s) => (
+                      <button
+                        key={s}
+                        className={s === speed ? "pop-chip engaged" : "pop-chip"}
+                        onClick={() => setSpeed(s)}
+                        aria-pressed={s === speed}
+                      >
+                        {s}×
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  className="pop-item"
+                  onClick={() => {
+                    onChange(0);
+                    setMenuOpen(false);
+                  }}
+                >
+                  <RotateCcw size={14} />
+                  <span>Restart</span>
+                  <kbd>Home</kbd>
+                </button>
+                {onExport ? (
+                  <button
+                    className="pop-item"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onExport();
+                    }}
+                  >
+                    <Video size={14} />
+                    <span>Export video</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -355,7 +414,6 @@ export function Timeline({ trace, currentSeq, onChange, onExport, exporting = fa
               </span>
             ))}
           </span>
-          <span className="legend-sep" />
           <span className="legend-group">
             <span className="legend-item">
               <span className="legend-glyph compaction" />
