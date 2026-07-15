@@ -62,7 +62,7 @@ export function Inspector({ file, touch, history, onClose, onJumpTo }: Inspector
           <dd>{file.bytes.toLocaleString()}</dd>
         </div>
       </dl>
-      <section>
+      <section className="inspector-history">
         <p className="eyebrow">Visits · {history.length}</p>
         <div className="history-list">
           {history
