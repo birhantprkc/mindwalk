@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/cosmtrek/mindwalk/internal/textutil"
 )
 
 // RunResult carries the judge's raw text plus which model produced it. The
@@ -165,11 +167,7 @@ func (r CLIRunner) Run(ctx context.Context, prompt, input string) (RunResult, er
 }
 
 func truncateFailureDetail(detail string) string {
-	runes := []rune(detail)
-	if len(runes) > 500 {
-		return string(runes[:500])
-	}
-	return detail
+	return textutil.TruncateRunes(detail, 500, "")
 }
 
 func codexExecArgs(workdir string) []string {

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cosmtrek/mindwalk/internal/model"
+	"github.com/cosmtrek/mindwalk/internal/textutil"
 )
 
 type Source interface {
@@ -58,11 +59,7 @@ const userMessageNoteLimit = 2000
 // promises the note never exceeds userMessageNoteLimit runes in total.
 func UserMessageNote(text string) string {
 	text = strings.TrimSpace(text)
-	runes := []rune(text)
-	if len(runes) <= userMessageNoteLimit {
-		return text
-	}
-	return string(runes[:userMessageNoteLimit-1]) + "…"
+	return textutil.TruncateRunes(text, userMessageNoteLimit, "…")
 }
 
 // InjectedUserMessage recognizes harness-injected text recorded as a user
@@ -960,11 +957,7 @@ func SummarizeTool(tool string, input map[string]any, targets []model.Target, ou
 		verb = desc
 	}
 	if command := firstString(input, "command", "cmd"); command != "" {
-		commandRunes := []rune(command)
-		verb = command
-		if len(commandRunes) > 96 {
-			verb = string(commandRunes[:93]) + "..."
-		}
+		verb = textutil.TruncateRunes(command, 96, "...")
 	}
 	status := ""
 	if isError {

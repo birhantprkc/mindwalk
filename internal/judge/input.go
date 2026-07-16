@@ -10,6 +10,7 @@ import (
 
 	"github.com/cosmtrek/mindwalk/internal/adapter"
 	"github.com/cosmtrek/mindwalk/internal/model"
+	"github.com/cosmtrek/mindwalk/internal/textutil"
 )
 
 const (
@@ -145,11 +146,7 @@ func writeNarrative(b *strings.Builder, trace *model.Trace) {
 }
 
 func truncateRunes(s string, limit int) string {
-	runes := []rune(s)
-	if len(runes) <= limit {
-		return s
-	}
-	return string(runes[:limit]) + " …[truncated]"
+	return textutil.TruncateRunes(s, limit, " …[truncated]")
 }
 
 func orUnknown(s string) string {

@@ -223,6 +223,17 @@ func TestBuildInputKeepsFirstAndNewestUserMessages(t *testing.T) {
 	}
 }
 
+func TestTruncateRunesKeepsMarkerWithinBudget(t *testing.T) {
+	got := truncateRunes(strings.Repeat("a", maxSummaryLen-1)+"界tail", maxSummaryLen)
+
+	if runes := []rune(got); len(runes) != maxSummaryLen {
+		t.Fatalf("truncated text is %d runes, want %d: %q", len(runes), maxSummaryLen, got)
+	}
+	if !strings.HasSuffix(got, " …[truncated]") {
+		t.Fatalf("truncated text missing marker: %q", got)
+	}
+}
+
 func TestCacheRoundTripAndFreshness(t *testing.T) {
 	cache := Cache{Dir: t.TempDir()}
 	trace := sampleTrace()

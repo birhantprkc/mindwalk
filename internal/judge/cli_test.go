@@ -59,3 +59,10 @@ func TestTruncateFailureDetailPreservesUTF8(t *testing.T) {
 		t.Fatalf("truncated detail = %q, want %q", got, want)
 	}
 }
+
+func TestTruncateFailureDetailRepairsInvalidUTF8(t *testing.T) {
+	got := truncateFailureDetail(string([]byte{'o', 'k', 0xff}))
+	if !utf8.ValidString(got) {
+		t.Fatalf("failure detail contains invalid UTF-8: %q", got)
+	}
+}
