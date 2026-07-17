@@ -9,12 +9,15 @@ export interface ChurnEntry {
 interface HudProps {
   trace?: Trace;
   city?: CityMap;
+  agentLabel?: string;
   // live counts at the playhead, passed as primitives so memo stays effective
   editedNow: number;
   readNow: number;
   seenNow: number;
   churn: ChurnEntry[];
   onSelectFile: (path: string) => void;
+  onOpenAgents?: () => void;
+  locked?: boolean;
 }
 
 const CHURN_PANEL_ROWS = 8;
@@ -24,11 +27,14 @@ const CHURN_PANEL_ROWS = 8;
 export const Hud = memo(function Hud({
   trace,
   city,
+  agentLabel,
   editedNow,
   readNow,
   seenNow,
   churn,
-  onSelectFile
+  onSelectFile,
+  onOpenAgents,
+  locked = false
 }: HudProps) {
   const stats = trace?.stats;
   const readFinal = stats ? stats.fovea - stats.edited : 0;
@@ -66,7 +72,20 @@ export const Hud = memo(function Hud({
   return (
     <div className="hud" aria-hidden={!city}>
       <div className="hud-left">
-        <div className="hud-repo">{city ? basename(city.repo.root) : ""}</div>
+        <div className="hud-title-line">
+          <div className="hud-repo">{city ? basename(city.repo.root) : ""}</div>
+          {trace && agentLabel ? (
+            <button
+              className="hud-lens"
+              onClick={onOpenAgents}
+              disabled={!onOpenAgents || locked}
+              aria-label={`Open Agent lenses, current ${agentLabel}`}
+            >
+              <span>Lens</span>
+              {agentLabel}
+            </button>
+          ) : null}
+        </div>
         {city ? (
           <div className="hud-commit">
             <span>{city.repo.commit || "worktree"}</span>
@@ -132,9 +151,15 @@ export const Hud = memo(function Hud({
                 {stats.userTurns} turns
               </span>
               {stats.subagents > 0 ? (
-                <span data-hint="Subagent launches (Task/Agent)">
+                <button
+                  className="hud-agent-link"
+                  data-hint="Subagent launches (Task/Agent) — open Agent lenses"
+                  onClick={onOpenAgents}
+                  disabled={!onOpenAgents || locked}
+                  aria-label={`Open ${stats.subagents} subagent${stats.subagents === 1 ? "" : "s"} in Agent lenses`}
+                >
                   {stats.subagents} subagent{stats.subagents === 1 ? "" : "s"}
-                </span>
+                </button>
               ) : null}
               {stats.compactions > 0 ? (
                 <span data-hint="Context compactions — the conversation was summarized to free memory">

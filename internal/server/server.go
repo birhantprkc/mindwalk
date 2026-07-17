@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -43,22 +44,26 @@ type Config struct {
 }
 
 type Server struct {
-	cfg       Config
-	adapters  []adapter.Source
-	mu        sync.Mutex
-	scanMu    sync.Mutex
-	sessions  []model.SessionMeta
-	sessionAt time.Time
-	freshGen  uint64
-	traces    map[string]*model.Trace
-	maps      map[string]*model.CityMap
-	cacheAt   map[string]time.Time
-	cacheUsed map[string]time.Time
-	cacheFile map[string]fileFingerprint
-	inflight  map[string]*inflightLoad
-	summaries map[string]summaryCacheEntry
-	repoMaps  map[string]repoMapEntry
-	repoMapMu sync.Mutex
+	cfg             Config
+	adapters        []adapter.Source
+	mu              sync.Mutex
+	scanMu          sync.Mutex
+	sessions        []model.SessionMeta
+	sessionCatalog  map[string]model.SessionMeta
+	sessionAt       time.Time
+	freshGen        uint64
+	traces          map[string]*model.Trace
+	maps            map[string]*model.CityMap
+	cacheAt         map[string]time.Time
+	cacheUsed       map[string]time.Time
+	cacheFile       map[string]fileFingerprint
+	inflight        map[string]*inflightLoad
+	agentGraphs     map[string]agentGraphCacheEntry
+	agentGraphLoads map[string]*inflightAgentGraph
+	summaries       map[string]summaryCacheEntry
+	repoMaps        map[string]repoMapEntry
+	repoMapMu       sync.Mutex
+	buildCityMap    func(string, *model.Trace) (*model.CityMap, error)
 
 	analyze     analyzeState
 	reportCache judge.Cache
@@ -82,10 +87,29 @@ type fileFingerprint struct {
 	modTime time.Time
 }
 
+type agentGraphFingerprint struct {
+	digest   [sha256.Size]byte
+	freshGen uint64
+}
+
+type agentGraphCacheEntry struct {
+	fingerprint agentGraphFingerprint
+	graph       *model.AgentGraph
+}
+
+type inflightAgentGraph struct {
+	done        chan struct{}
+	fingerprint agentGraphFingerprint
+	graph       *model.AgentGraph
+	err         error
+}
+
 type summaryCacheEntry struct {
-	size    int64
-	modTime time.Time
-	meta    model.SessionMeta
+	size          int64
+	modTime       time.Time
+	sidecar       fileFingerprint
+	sidecarExists bool
+	meta          model.SessionMeta
 }
 
 const (
@@ -100,16 +124,20 @@ const (
 
 func New(cfg Config) *Server {
 	return &Server{
-		cfg:       cfg,
-		adapters:  []adapter.Source{claudecode.Adapter{Dir: cfg.ClaudeDir}, codex.Adapter{Dir: cfg.CodexDir}},
-		traces:    map[string]*model.Trace{},
-		maps:      map[string]*model.CityMap{},
-		cacheAt:   map[string]time.Time{},
-		cacheUsed: map[string]time.Time{},
-		cacheFile: map[string]fileFingerprint{},
-		inflight:  map[string]*inflightLoad{},
-		summaries: map[string]summaryCacheEntry{},
-		repoMaps:  map[string]repoMapEntry{},
+		cfg:             cfg,
+		adapters:        []adapter.Source{claudecode.Adapter{Dir: cfg.ClaudeDir}, codex.Adapter{Dir: cfg.CodexDir}},
+		traces:          map[string]*model.Trace{},
+		maps:            map[string]*model.CityMap{},
+		cacheAt:         map[string]time.Time{},
+		cacheUsed:       map[string]time.Time{},
+		cacheFile:       map[string]fileFingerprint{},
+		inflight:        map[string]*inflightLoad{},
+		agentGraphs:     map[string]agentGraphCacheEntry{},
+		agentGraphLoads: map[string]*inflightAgentGraph{},
+		summaries:       map[string]summaryCacheEntry{},
+		sessionCatalog:  map[string]model.SessionMeta{},
+		repoMaps:        map[string]repoMapEntry{},
+		buildCityMap:    citymap.Builder{}.Build,
 
 		analyze:     analyzeState{jobs: map[string]*analyzeJob{}},
 		reportCache: judge.Cache{Dir: judge.DefaultCacheDir()},
@@ -178,6 +206,14 @@ type sessionListItem struct {
 
 func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/")
+	if len(parts) == 2 && parts[1] == "agents" {
+		s.handleSessionAgents(w, r, parts[0])
+		return
+	}
+	if len(parts) == 4 && parts[1] == "agents" && parts[3] == "trace" {
+		s.handleSessionAgentTrace(w, r, parts[0], parts[2])
+		return
+	}
 	if len(parts) != 2 {
 		http.NotFound(w, r)
 		return
@@ -215,6 +251,82 @@ func (s *Server) handleSessionResource(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleSessionAgents(w http.ResponseWriter, r *http.Request, selector string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	root, err := s.findSession(selector)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	graph, err := s.agentGraph(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, graph)
+}
+
+func (s *Server) handleSessionAgentTrace(w http.ResponseWriter, r *http.Request, selector, nodeID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	root, err := s.findSession(selector)
+	if err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	graph, err := s.agentGraph(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var node *model.AgentNode
+	for i := range graph.Agents {
+		if graph.Agents[i].ID == nodeID {
+			node = &graph.Agents[i]
+			break
+		}
+	}
+	if node == nil {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+	if node.TraceAvailability != model.TraceAvailabilityAvailable {
+		http.Error(w, "agent trace unavailable: "+node.TraceAvailability, http.StatusConflict)
+		return
+	}
+
+	if node.Kind == model.AgentKindMain {
+		trace, _, err := s.traceAndMapMeta(root)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, trace)
+		return
+	}
+	child, err := s.findCatalogSession(node.TraceSessionKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_, rootCity, err := s.traceAndMapMeta(root)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	trace, err := s.parseSessionTrace(child)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, traceAgainstCity(trace, rootCity))
 }
 
 // handleRepoMap serves the citymap for a repo with no session / trace attached.
@@ -315,16 +427,21 @@ func (s *Server) listSessionsObserved(fresh bool, observedFreshGen uint64) ([]mo
 	if s.cfg.OpenSession != "" {
 		meta, err := s.summarizeAnyCached(s.cfg.OpenSession, nil)
 		if err == nil {
-			found := false
-			for i := range sessions {
-				if sessions[i].Key == meta.Key {
-					sessions[i] = meta
-					found = true
-					break
+			s.mu.Lock()
+			s.sessionCatalog[meta.Key] = meta
+			s.mu.Unlock()
+			if !meta.Auxiliary {
+				found := false
+				for i := range sessions {
+					if sessions[i].Key == meta.Key {
+						sessions[i] = meta
+						found = true
+						break
+					}
 				}
-			}
-			if !found {
-				sessions = append([]model.SessionMeta{meta}, sessions...)
+				if !found {
+					sessions = append([]model.SessionMeta{meta}, sessions...)
+				}
 			}
 		}
 	}
@@ -336,6 +453,7 @@ func (s *Server) listSessionsObserved(fresh bool, observedFreshGen uint64) ([]mo
 	s.sessionAt = time.Now()
 	if fresh {
 		s.freshGen++
+		clear(s.agentGraphs)
 	}
 	s.mu.Unlock()
 	return sessions, nil
@@ -364,7 +482,7 @@ func (s *Server) scanSessions() ([]model.SessionMeta, error) {
 			if entry.IsDir() {
 				return nil
 			}
-			if filepath.Ext(path) != ".jsonl" || skipSessionFile(source, path) {
+			if filepath.Ext(path) != ".jsonl" {
 				return nil
 			}
 			info, err := entry.Info()
@@ -414,12 +532,20 @@ func (s *Server) scanSessions() ([]model.SessionMeta, error) {
 		}
 	}
 
+	catalog := make(map[string]model.SessionMeta, len(files))
 	sessions := make([]model.SessionMeta, 0, len(files))
 	for _, meta := range results {
-		if meta != nil && !meta.Auxiliary {
+		if meta == nil {
+			continue
+		}
+		catalog[meta.Key] = *meta
+		if !meta.Auxiliary {
 			sessions = append(sessions, *meta)
 		}
 	}
+	s.mu.Lock()
+	s.sessionCatalog = catalog
+	s.mu.Unlock()
 	s.pruneSummaryCache(seen)
 	return sessions, nil
 }
@@ -448,8 +574,10 @@ func (s *Server) summarizeCached(source adapter.Source, path string, info fs.Fil
 		}
 	}
 	key := summaryKey(source, path)
+	sidecar, sidecarExists := summarySidecarFingerprint(source, path)
 	s.mu.Lock()
-	if cached, ok := s.summaries[key]; ok && cached.size == info.Size() && cached.modTime.Equal(info.ModTime()) {
+	if cached, ok := s.summaries[key]; ok && cached.size == info.Size() && cached.modTime.Equal(info.ModTime()) &&
+		cached.sidecarExists == sidecarExists && cached.sidecar.equal(sidecar) {
 		meta := cached.meta
 		s.mu.Unlock()
 		return meta, nil
@@ -464,9 +592,23 @@ func (s *Server) summarizeCached(source adapter.Source, path string, info fs.Fil
 		meta.Key = adapter.SessionKey(source.Harness(), path)
 	}
 	s.mu.Lock()
-	s.summaries[key] = summaryCacheEntry{size: info.Size(), modTime: info.ModTime(), meta: meta}
+	s.summaries[key] = summaryCacheEntry{
+		size:          info.Size(),
+		modTime:       info.ModTime(),
+		sidecar:       sidecar,
+		sidecarExists: sidecarExists,
+		meta:          meta,
+	}
 	s.mu.Unlock()
 	return meta, nil
+}
+
+func summarySidecarFingerprint(source adapter.Source, path string) (fileFingerprint, bool) {
+	if source.Harness() != "claude-code" || !strings.HasPrefix(filepath.Base(path), "agent-") {
+		return fileFingerprint{}, false
+	}
+	fingerprint, err := fingerprintFile(strings.TrimSuffix(path, ".jsonl") + ".meta.json")
+	return fingerprint, err == nil
 }
 
 func (s *Server) pruneSummaryCache(seen map[string]bool) {
@@ -484,6 +626,10 @@ func (s *Server) traceAndMap(selector string) (*model.Trace, *model.CityMap, err
 	if err != nil {
 		return nil, nil, err
 	}
+	return s.traceAndMapMeta(meta)
+}
+
+func (s *Server) traceAndMapMeta(meta model.SessionMeta) (*model.Trace, *model.CityMap, error) {
 	key := meta.Key
 	if key == "" {
 		key = adapter.SessionKey(meta.Harness, meta.Path)
@@ -535,6 +681,110 @@ func (s *Server) traceAndMap(selector string) (*model.Trace, *model.CityMap, err
 	}
 }
 
+func (s *Server) agentGraph(root model.SessionMeta) (*model.AgentGraph, error) {
+	source := s.adapterForHarness(root.Harness)
+	graphSource, ok := source.(adapter.AgentGraphSource)
+	if !ok {
+		return nil, fmt.Errorf("adapter for harness %q does not support agent graphs", root.Harness)
+	}
+	for {
+		s.mu.Lock()
+		catalog := make([]model.SessionMeta, 0, len(s.sessionCatalog))
+		for _, session := range s.sessionCatalog {
+			catalog = append(catalog, session)
+		}
+		freshGen := s.freshGen
+		s.mu.Unlock()
+		sort.Slice(catalog, func(i, j int) bool { return catalog[i].Key < catalog[j].Key })
+
+		inputs, err := graphSource.AgentGraphInputs(root, catalog)
+		if err != nil {
+			return nil, err
+		}
+		fingerprint, err := fingerprintAgentGraphInputs(inputs, freshGen)
+		if err != nil {
+			return nil, err
+		}
+
+		s.mu.Lock()
+		if cached, ok := s.agentGraphs[root.Key]; ok && cached.fingerprint == fingerprint {
+			s.mu.Unlock()
+			return cached.graph, nil
+		}
+		if load := s.agentGraphLoads[root.Key]; load != nil {
+			done := load.done
+			shareSnapshot := load.fingerprint == fingerprint
+			s.mu.Unlock()
+			<-done
+			if shareSnapshot {
+				return load.graph, load.err
+			}
+			continue
+		}
+		load := &inflightAgentGraph{done: make(chan struct{}), fingerprint: fingerprint}
+		s.agentGraphLoads[root.Key] = load
+		s.mu.Unlock()
+
+		s.runAgentGraphInflight(root.Key, load, graphSource, root, catalog)
+		return load.graph, load.err
+	}
+}
+
+func fingerprintAgentGraphInputs(paths []string, freshGen uint64) (agentGraphFingerprint, error) {
+	paths = append([]string(nil), paths...)
+	sort.Strings(paths)
+	var material strings.Builder
+	fmt.Fprintf(&material, "fresh:%d\n", freshGen)
+	previous := ""
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		if path == previous {
+			continue
+		}
+		previous = path
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			fmt.Fprintf(&material, "%s\x00missing\n", path)
+			continue
+		}
+		if err != nil {
+			return agentGraphFingerprint{}, err
+		}
+		fmt.Fprintf(&material, "%s\x00%d\x00%d\n", path, info.Size(), info.ModTime().UnixNano())
+	}
+	return agentGraphFingerprint{digest: sha256.Sum256([]byte(material.String())), freshGen: freshGen}, nil
+}
+
+func (s *Server) runAgentGraphInflight(key string, load *inflightAgentGraph, source adapter.AgentGraphSource, root model.SessionMeta, catalog []model.SessionMeta) {
+	defer func() {
+		if r := recover(); r != nil {
+			load.graph = nil
+			load.err = fmt.Errorf("build agent graph %s: %v", key, r)
+			log.Printf("mindwalk: panic building agent graph %s: %v\n%s", key, r, debug.Stack())
+		}
+		s.mu.Lock()
+		if load.err == nil {
+			s.agentGraphs[key] = agentGraphCacheEntry{fingerprint: load.fingerprint, graph: load.graph}
+		}
+		if s.agentGraphLoads[key] == load {
+			delete(s.agentGraphLoads, key)
+		}
+		close(load.done)
+		s.mu.Unlock()
+	}()
+	load.graph, load.err = source.BuildAgentGraph(root, catalog)
+}
+
+func (s *Server) findCatalogSession(key string) (model.SessionMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	meta, ok := s.sessionCatalog[key]
+	if !ok {
+		return model.SessionMeta{}, errors.New("session not found")
+	}
+	return meta, nil
+}
+
 // runInflight executes the shared load for key and publishes the result on
 // load. The finalize step — cache the result, drop the inflight entry, close
 // load.done — runs in a defer so a panicking loader cannot skip it. Without
@@ -566,16 +816,9 @@ func (s *Server) runInflight(key string, load *inflightLoad, meta model.SessionM
 }
 
 func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.CityMap, error) {
-	source := s.adapterForHarness(meta.Harness)
-	if source == nil {
-		return nil, nil, fmt.Errorf("no adapter for harness %q", meta.Harness)
-	}
-	trace, parseErr := source.Parse(meta.Path)
-	if trace == nil {
-		if parseErr != nil {
-			return nil, nil, parseErr
-		}
-		return nil, nil, errors.New("trace unavailable")
+	trace, err := s.parseSessionTrace(meta)
+	if err != nil {
+		return nil, nil, err
 	}
 	repoRoot := trace.Session.Cwd
 	if repoRoot == "" {
@@ -587,7 +830,7 @@ func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.C
 	if repoRoot == "" {
 		repoRoot = filepath.Dir(meta.Path)
 	}
-	city, err := citymap.Builder{}.Build(repoRoot, trace)
+	city, err := s.buildCityMap(repoRoot, trace)
 	if err != nil {
 		city = emptyCityMap(repoRoot)
 	} else {
@@ -597,6 +840,21 @@ func (s *Server) loadTraceAndMap(meta model.SessionMeta) (*model.Trace, *model.C
 	// grade for its error signal — the recount cannot re-derive it.
 	trace.Stats = model.ComputeStats(trace, repoFileCount(city), trace.Stats.Observability.Errors)
 	return trace, city, nil
+}
+
+func (s *Server) parseSessionTrace(meta model.SessionMeta) (*model.Trace, error) {
+	source := s.adapterForHarness(meta.Harness)
+	if source == nil {
+		return nil, fmt.Errorf("no adapter for harness %q", meta.Harness)
+	}
+	trace, parseErr := source.Parse(meta.Path)
+	if trace == nil {
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return nil, errors.New("trace unavailable")
+	}
+	return trace, nil
 }
 
 func emptyCityMap(repoRoot string) *model.CityMap {
@@ -722,10 +980,6 @@ func summaryPath(key string) string {
 	return key
 }
 
-func skipSessionFile(source adapter.Source, path string) bool {
-	return source.Harness() == "claude-code" && strings.HasPrefix(filepath.Base(path), "agent-")
-}
-
 func assignFileIDs(trace *model.Trace, city *model.CityMap) {
 	ids := map[string]int{}
 	for _, file := range city.Files {
@@ -733,12 +987,29 @@ func assignFileIDs(trace *model.Trace, city *model.CityMap) {
 	}
 	for ei := range trace.Events {
 		for ti := range trace.Events[ei].Targets {
+			trace.Events[ei].Targets[ti].FileID = nil
 			if id, ok := ids[trace.Events[ei].Targets[ti].Path]; ok {
 				v := id
 				trace.Events[ei].Targets[ti].FileID = &v
 			}
 		}
 	}
+}
+
+func traceAgainstCity(trace *model.Trace, city *model.CityMap) *model.Trace {
+	clone := *trace
+	clone.Events = append([]model.Event{}, trace.Events...)
+	for i := range clone.Events {
+		clone.Events[i].Targets = append([]model.Target{}, trace.Events[i].Targets...)
+		for j := range clone.Events[i].Targets {
+			clone.Events[i].Targets[j].Lines = append([][2]int{}, trace.Events[i].Targets[j].Lines...)
+		}
+		clone.Events[i].Outside = append([]model.OutsideTouch{}, trace.Events[i].Outside...)
+	}
+	clone.Marks = append([]model.Mark{}, trace.Marks...)
+	assignFileIDs(&clone, city)
+	clone.Stats = model.ComputeStats(&clone, repoFileCount(city), trace.Stats.Observability.Errors)
+	return &clone
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {

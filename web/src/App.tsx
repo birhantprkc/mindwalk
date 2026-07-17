@@ -2,15 +2,18 @@ import { PanelLeftOpen } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   describeError,
+  getAgentTrace,
   getRepoMap,
+  getSessionAgents,
   getSessionReport,
   getSessionSnapshot,
   listSessions,
   startSessionAnalyze
 } from "./api/client";
-import { Crosshair, Sparkles, Mountain, TreePine } from "lucide-react";
-import type { JudgeChoice, ReportStatus } from "./types";
+import { Crosshair, Sparkles, Mountain, TreePine, Users } from "lucide-react";
+import type { AgentGraph, CityMap, JudgeChoice, ReportStatus, Trace } from "./types";
 import { Dock, type PanelDescriptor } from "./ui/Dock";
+import { AgentsPanel } from "./ui/AgentsPanel";
 import { ReportPanel } from "./ui/ReportPanel";
 import { ViewPanel } from "./ui/ViewPanel";
 import { PlaybackEngine } from "./playback/reducer";
@@ -40,6 +43,8 @@ function evaluateHint(badge: "running" | "done" | "stale" | "failed" | null): st
       return "Evaluate this session with your local agent CLI";
   }
 }
+
+const MAIN_ACTOR_KEY = "__main__";
 
 export default function App() {
   const {
@@ -72,6 +77,9 @@ export default function App() {
   const urlSessionConsumed = useRef(false);
   const scanGeneration = useRef(0);
   const loadGeneration = useRef(0);
+  const lensGeneration = useRef(0);
+  const agentGraphRequest = useRef(0);
+  const agentTraceRequest = useRef(0);
   const manualRefreshInFlight = useRef(false);
   const pendingLoads = useRef(0);
   const activeSessionKeyRef = useRef(activeSessionKey);
@@ -81,6 +89,18 @@ export default function App() {
   const [openSheet, setOpenSheet] = useState<string | null>(null);
   const [openPop, setOpenPop] = useState<string | null>(null);
   const [reportStatus, setReportStatus] = useState<ReportStatus | undefined>();
+  const [agentGraph, setAgentGraph] = useState<AgentGraph | undefined>();
+  const [activeAgentID, setActiveAgentID] = useState<string | null>(null);
+  const [agentGraphLoading, setAgentGraphLoading] = useState(false);
+  const [loadingAgentID, setLoadingAgentID] = useState<string | undefined>();
+  const [agentPanelError, setAgentPanelError] = useState<string | undefined>();
+  const [agentRetryID, setAgentRetryID] = useState<string | null | undefined>();
+  const activeAgentIDRef = useRef<string | null>(null);
+  const pendingAgentIDRef = useRef<string | undefined>(undefined);
+  const rootTraceRef = useRef<Trace | undefined>(undefined);
+  const rootCityRef = useRef<CityMap | undefined>(undefined);
+  const actorTraceCache = useRef(new Map<string, Trace>());
+  const actorPlayheads = useRef(new Map<string, number>());
   const exportingRef = useRef(false);
   exportingRef.current = exporting;
 
@@ -100,15 +120,93 @@ export default function App() {
     if (pendingLoads.current === 0) setLoading(false);
   }, [setLoading]);
 
+  const resetLens = useCallback(() => {
+    const generation = ++lensGeneration.current;
+    agentGraphRequest.current++;
+    agentTraceRequest.current++;
+    activeAgentIDRef.current = null;
+    pendingAgentIDRef.current = undefined;
+    rootTraceRef.current = undefined;
+    rootCityRef.current = undefined;
+    actorTraceCache.current.clear();
+    actorPlayheads.current.clear();
+    setAgentGraph(undefined);
+    setActiveAgentID(null);
+    setAgentGraphLoading(false);
+    setLoadingAgentID(undefined);
+    setAgentPanelError(undefined);
+    setAgentRetryID(undefined);
+    return generation;
+  }, []);
+
+  const loadAgentGraph = useCallback(async (key: string, generation = lensGeneration.current) => {
+    const request = ++agentGraphRequest.current;
+    setAgentGraphLoading(true);
+    setAgentPanelError(undefined);
+    setAgentRetryID(undefined);
+    try {
+      const graph = await getSessionAgents(key);
+      if (
+        generation !== lensGeneration.current ||
+        request !== agentGraphRequest.current ||
+        activeSessionKeyRef.current !== key
+      ) {
+        return;
+      }
+      setAgentGraph(graph);
+    } catch (err) {
+      if (
+        generation === lensGeneration.current &&
+        request === agentGraphRequest.current &&
+        activeSessionKeyRef.current === key
+      ) {
+        setAgentPanelError(describeError(err, "loading agents"));
+        setAgentRetryID(null);
+      }
+    } finally {
+      if (
+        generation === lensGeneration.current &&
+        request === agentGraphRequest.current &&
+        activeSessionKeyRef.current === key
+      ) {
+        setAgentGraphLoading(false);
+      }
+    }
+  }, []);
+
   const loadSession = useCallback(async (key: string) => {
     const generation = ++loadGeneration.current;
+    const currentLensGeneration = lensGeneration.current;
     beginLoading();
     setError(undefined);
     try {
       const { trace: nextTrace, city: nextCity } = await getSessionSnapshot(key);
-      if (generation !== loadGeneration.current || activeSessionKeyRef.current !== key) return;
-      setData(nextTrace, nextCity);
-      setSelectedPath(undefined);
+      if (
+        generation !== loadGeneration.current ||
+        currentLensGeneration !== lensGeneration.current ||
+        activeSessionKeyRef.current !== key
+      ) {
+        return;
+      }
+      rootTraceRef.current = nextTrace;
+      rootCityRef.current = nextCity;
+      actorTraceCache.current.set(MAIN_ACTOR_KEY, nextTrace);
+      const activeChildID = activeAgentIDRef.current;
+      if (activeChildID === null) {
+        setData(nextTrace, nextCity);
+        const remembered = actorPlayheads.current.get(MAIN_ACTOR_KEY);
+        if (remembered !== undefined) {
+          setCurrentSeq(Math.min(remembered, Math.max(0, nextTrace.events.length - 1)));
+        }
+        setSelectedPath(undefined);
+      } else {
+        const childTrace = actorTraceCache.current.get(activeChildID);
+        if (childTrace) {
+          const seq = useAppStore.getState().currentSeq;
+          setData(childTrace, nextCity);
+          setCurrentSeq(Math.min(seq, Math.max(0, childTrace.events.length - 1)));
+        }
+      }
     } catch (err) {
       if (generation === loadGeneration.current && activeSessionKeyRef.current === key) {
         setError(describeError(err, "loading the session"));
@@ -116,7 +214,34 @@ export default function App() {
     } finally {
       endLoading();
     }
-  }, [beginLoading, endLoading, setData, setError, setSelectedPath]);
+  }, [beginLoading, endLoading, setCurrentSeq, setData, setError, setSelectedPath]);
+
+  const invalidateActorTracesForRescan = useCallback(() => {
+    const activeActorID = activeAgentIDRef.current;
+    actorPlayheads.current.set(
+      activeActorID ?? MAIN_ACTOR_KEY,
+      useAppStore.getState().currentSeq
+    );
+    agentTraceRequest.current++;
+    pendingAgentIDRef.current = undefined;
+    actorTraceCache.current.clear();
+    activeAgentIDRef.current = null;
+    setActiveAgentID(null);
+    setLoadingAgentID(undefined);
+    setAgentPanelError(undefined);
+    setAgentRetryID(undefined);
+
+    const rootTrace = rootTraceRef.current;
+    const rootCity = rootCityRef.current;
+    if (rootTrace && rootCity) {
+      setData(rootTrace, rootCity);
+      const remembered = actorPlayheads.current.get(MAIN_ACTOR_KEY);
+      if (remembered !== undefined) {
+        setCurrentSeq(Math.min(remembered, Math.max(0, rootTrace.events.length - 1)));
+      }
+      setSelectedPath(undefined);
+    }
+  }, [setCurrentSeq, setData, setSelectedPath]);
 
   const scan = useCallback(async (fresh: boolean) => {
     const generation = ++scanGeneration.current;
@@ -152,9 +277,14 @@ export default function App() {
       )?.key;
       const next = preferred ?? (stillListed ? currentActiveKey : fallback);
       if (next !== currentActiveKey) {
+        const lens = resetLens();
         activeSessionKeyRef.current = next;
         if (!next) loadGeneration.current++;
         setActiveSession(next);
+        if (next) void loadAgentGraph(next, lens);
+      } else if (fresh && next) {
+        invalidateActorTracesForRescan();
+        void loadAgentGraph(next);
       }
       if (next) await loadSession(next);
     } catch (err) {
@@ -164,7 +294,7 @@ export default function App() {
     } finally {
       endLoading();
     }
-  }, [beginLoading, endLoading, harnessFilter, hideEmpty, loadSession, setActiveSession, setError, setSessions]);
+  }, [beginLoading, endLoading, harnessFilter, hideEmpty, invalidateActorTracesForRescan, loadAgentGraph, loadSession, resetLens, setActiveSession, setError, setSessions]);
 
   const loadRepoMap = useCallback(async (repo?: string) => {
     beginLoading();
@@ -186,21 +316,117 @@ export default function App() {
   }, []);
 
   const selectSession = useCallback((key: string) => {
+    if (activeSessionKeyRef.current === key) return;
+    const lens = resetLens();
     activeSessionKeyRef.current = key;
     setActiveSession(key);
+    void loadAgentGraph(key, lens);
     void loadSession(key);
-  }, [loadSession, setActiveSession]);
+  }, [loadAgentGraph, loadSession, resetLens, setActiveSession]);
+
+  const saveActivePlayhead = useCallback(() => {
+    const key = activeAgentIDRef.current ?? MAIN_ACTOR_KEY;
+    actorPlayheads.current.set(key, useAppStore.getState().currentSeq);
+  }, []);
+
+  const showCachedActor = useCallback((agentID: string | null, nextTrace: Trace, nextCity: CityMap) => {
+    saveActivePlayhead();
+    activeAgentIDRef.current = agentID;
+    setActiveAgentID(agentID);
+    setData(nextTrace, nextCity);
+    const remembered = actorPlayheads.current.get(agentID ?? MAIN_ACTOR_KEY);
+    if (remembered !== undefined) {
+      setCurrentSeq(Math.min(remembered, Math.max(0, nextTrace.events.length - 1)));
+    }
+    setSelectedPath(undefined);
+  }, [saveActivePlayhead, setCurrentSeq, setData, setSelectedPath]);
+
+  const selectAgent = useCallback(async (agentID: string | null) => {
+    if (exportingRef.current) return;
+    const rootKey = activeSessionKeyRef.current;
+    const nextCity = rootCityRef.current;
+    if (!rootKey || !nextCity) return;
+
+    const request = ++agentTraceRequest.current;
+    pendingAgentIDRef.current = undefined;
+    setLoadingAgentID(undefined);
+    setAgentPanelError(undefined);
+    setAgentRetryID(undefined);
+
+    if (activeAgentIDRef.current === agentID) return;
+
+    const cachedTrace =
+      agentID === null ? rootTraceRef.current : actorTraceCache.current.get(agentID);
+    if (cachedTrace) {
+      showCachedActor(agentID, cachedTrace, nextCity);
+      return;
+    }
+    if (agentID === null) return;
+
+    const node = agentGraph?.agents.find((agent) => agent.id === agentID);
+    if (!node || node.traceAvailability !== "available") return;
+
+    const generation = lensGeneration.current;
+    pendingAgentIDRef.current = agentID;
+    setLoadingAgentID(agentID);
+    try {
+      const nextTrace = await getAgentTrace(rootKey, agentID);
+      if (
+        generation !== lensGeneration.current ||
+        request !== agentTraceRequest.current ||
+        pendingAgentIDRef.current !== agentID ||
+        activeSessionKeyRef.current !== rootKey ||
+        exportingRef.current
+      ) {
+        return;
+      }
+      actorTraceCache.current.set(agentID, nextTrace);
+      showCachedActor(agentID, nextTrace, rootCityRef.current ?? nextCity);
+    } catch (err) {
+      if (
+        generation === lensGeneration.current &&
+        request === agentTraceRequest.current &&
+        pendingAgentIDRef.current === agentID &&
+        activeSessionKeyRef.current === rootKey
+      ) {
+        setAgentPanelError(describeError(err, `loading the ${node.label} trace`));
+        setAgentRetryID(agentID);
+      }
+    } finally {
+      if (
+        generation === lensGeneration.current &&
+        request === agentTraceRequest.current &&
+        pendingAgentIDRef.current === agentID &&
+        activeSessionKeyRef.current === rootKey
+      ) {
+        pendingAgentIDRef.current = undefined;
+        setLoadingAgentID(undefined);
+      }
+    }
+  }, [agentGraph, showCachedActor]);
+
+  const retryAgents = useCallback(() => {
+    const key = activeSessionKeyRef.current;
+    if (exportingRef.current || !key || agentRetryID === undefined) return;
+    if (agentRetryID === null) void loadAgentGraph(key);
+    else void selectAgent(agentRetryID);
+  }, [agentRetryID, loadAgentGraph, selectAgent]);
 
   const exportVideo = useCallback(async () => {
     const canvas = canvasRef.current;
     const total = trace?.events.length ?? 0;
-    if (!canvas || total === 0 || exporting) return;
+    if (!canvas || total === 0 || exportingRef.current) return;
     // the recorder owns the playhead for the duration of the export; setting
     // exporting=true locks the transport, scrubber, session rail, and view
     // toggle (see the `exporting` prop threaded into Timeline/SessionRail/Hud)
     // so nothing else moves the playhead or swaps the canvas mid-recording
     const exportSessionKey = activeSessionKeyRef.current;
+    const exportActorID = activeAgentIDRef.current;
     const resumeSeq = useAppStore.getState().currentSeq;
+    agentTraceRequest.current++;
+    pendingAgentIDRef.current = undefined;
+    setLoadingAgentID(undefined);
+    exportingRef.current = true;
     setExporting(true);
     setError(undefined);
     try {
@@ -214,11 +440,15 @@ export default function App() {
     } catch (err) {
       setError(describeError(err, "exporting the video"));
     } finally {
-      // only restore the playhead if we're still on the same session — a guard
-      // in case a switch slipped through; normally the UI lock prevents it
-      if (activeSessionKeyRef.current === exportSessionKey) {
+      // only restore the playhead if we're still on the same session and actor —
+      // a guard in case a switch slipped through; normally the UI lock prevents it
+      if (
+        activeSessionKeyRef.current === exportSessionKey &&
+        activeAgentIDRef.current === exportActorID
+      ) {
         setCurrentSeq(resumeSeq);
       }
+      exportingRef.current = false;
       setExporting(false);
     }
   }, [trace, exporting, setCurrentSeq, setError]);
@@ -261,7 +491,7 @@ export default function App() {
   // must be refetched explicitly — it may have gone stale or finished while
   // we weren't polling
   const refresh = useCallback(() => {
-    if (manualRefreshInFlight.current) return;
+    if (exportingRef.current || manualRefreshInFlight.current) return;
     manualRefreshInFlight.current = true;
     const key = activeSessionKeyRef.current;
     if (key && !mapOnly) void refreshReport(key);
@@ -326,6 +556,9 @@ export default function App() {
 
   const closeSheet = useCallback(() => setOpenSheet(null), []);
   const closePop = useCallback(() => setOpenPop(null), []);
+  const openAgents = useCallback(() => {
+    if (!exportingRef.current) setOpenSheet("agents");
+  }, []);
 
   // sheets are exclusive (one full-height paper at a time); pops toggle
   // independently so a view tweak never steals the open report
@@ -342,13 +575,37 @@ export default function App() {
   // the dock away from the evaluation tab
   const jumpToEvidence = useCallback(
     (seq: number) => {
+      if (exportingRef.current) return;
+      const rootTrace = rootTraceRef.current;
+      const rootCity = rootCityRef.current;
+      if (!rootTrace || !rootCity) return;
+      agentTraceRequest.current++;
+      pendingAgentIDRef.current = undefined;
+      setLoadingAgentID(undefined);
+      if (activeAgentIDRef.current !== null) {
+        saveActivePlayhead();
+        activeAgentIDRef.current = null;
+        setActiveAgentID(null);
+        setData(rootTrace, rootCity);
+      }
       setCurrentSeq(seq);
-      const event = trace?.events[seq];
+      actorPlayheads.current.set(MAIN_ACTOR_KEY, seq);
+      const event = rootTrace.events[seq];
       const path = event?.targets.find((target) => target.path)?.path;
-      if (path) setSelectedPath(path);
+      setSelectedPath(path);
     },
-    [trace, setCurrentSeq, setSelectedPath]
+    [saveActivePlayhead, setCurrentSeq, setData, setSelectedPath]
   );
+
+  const openAgentsAtMark = useCallback((seq: number) => {
+    setCurrentSeq(seq);
+    setOpenSheet("agents");
+  }, [setCurrentSeq]);
+
+  const jumpToHistory = useCallback((seq: number) => {
+    if (exportingRef.current) return;
+    setCurrentSeq(seq);
+  }, [setCurrentSeq]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -392,6 +649,11 @@ export default function App() {
     if (reportStatus?.state === "done") return reportStatus.stale ? ("stale" as const) : ("done" as const);
     return null;
   }, [reportStatus]);
+
+  const agentLabel = useMemo(() => {
+    if (activeAgentID === null) return "Main";
+    return agentGraph?.agents.find((agent) => agent.id === activeAgentID)?.label ?? "Subagent";
+  }, [activeAgentID, agentGraph]);
 
   const viewNote =
     view === "tree"
@@ -491,11 +753,14 @@ export default function App() {
           <Hud
             trace={trace}
             city={city}
+            agentLabel={agentLabel}
             editedNow={touchCounts.edited}
             readNow={touchCounts.read}
             seenNow={touchCounts.seen}
             churn={churn}
             onSelectFile={selectFile}
+            onOpenAgents={!mapOnly && trace ? openAgents : undefined}
+            locked={exporting}
           />
           {city ? (
             <Dock
@@ -522,10 +787,36 @@ export default function App() {
                       touch={selectedFile ? playback.touchByPath.get(selectedFile.path) : undefined}
                       history={selectedFile ? (playback.historyByPath.get(selectedFile.path) ?? []) : []}
                       onClose={closeSheet}
-                      onJumpTo={setCurrentSeq}
+                      onJumpTo={jumpToHistory}
+                      locked={exporting}
                     />
                   )
                 },
+                ...(!mapOnly && trace
+                  ? [
+                      {
+                        id: "agents",
+                        icon: Users,
+                        hint: `Agent lenses — current: ${agentLabel}`,
+                        section: "session",
+                        presentation: "sheet",
+                        render: () => (
+                          <AgentsPanel
+                            graph={agentGraph}
+                            current={activeAgentID}
+                            loading={agentGraphLoading}
+                            loadingAgentID={loadingAgentID}
+                            locked={exporting}
+                            error={agentPanelError}
+                            retryAgentID={agentRetryID}
+                            onSelect={(agentID) => void selectAgent(agentID)}
+                            onRetry={retryAgents}
+                            onClose={closeSheet}
+                          />
+                        )
+                      } satisfies PanelDescriptor
+                    ]
+                  : []),
                 ...(!mapOnly && trace
                   ? [
                       {
@@ -539,6 +830,7 @@ export default function App() {
                           <ReportPanel
                             status={reportStatus}
                             analyzing={reportStatus?.state === "running"}
+                            locked={exporting}
                             onAnalyze={(choice) => void analyzeSession(choice)}
                             onClose={closeSheet}
                             onJumpTo={jumpToEvidence}
@@ -576,6 +868,7 @@ export default function App() {
           onChange={setCurrentSeq}
           onExport={recordingSupported() ? exportVideo : undefined}
           exporting={exporting}
+          onSubagentMark={openAgentsAtMark}
         />
       </section>
     </main>
