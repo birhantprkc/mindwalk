@@ -89,6 +89,54 @@ func TestSummarizeToolTruncatesCommandAtRuneBoundary(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolExtractsCommandsFromExecWrapper(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "single command",
+			source: `const r = await tools.exec_command({cmd:"jq '.city | keys' snapshot.json",workdir:"/tmp"}); text(r.output)`,
+			want:   "jq '.city | keys' snapshot.json -> 0 targets, 0 outside",
+		},
+		{
+			name:   "multiple tool calls",
+			source: `const rs = await Promise.all([tools.exec_command({cmd:"go test ./..."}), tools.exec_command({cmd:"go vet ./..."})]); text(rs)`,
+			want:   "go test ./... (+1 more tool call) -> 0 targets, 0 outside",
+		},
+		{
+			name:   "dynamic command keeps nested tool identity",
+			source: `const r = await tools.exec_command({cmd,workdir:"/tmp"}); text(r.output)`,
+			want:   "exec_command -> 0 targets, 0 outside",
+		},
+		{
+			name:   "non-command tool keeps nested identity",
+			source: `const p = await tools.update_plan({plan:[]}); text(p)`,
+			want:   "update_plan -> 0 targets, 0 outside",
+		},
+		{
+			name:   "mixed calls retain count",
+			source: `const r = await tools.exec_command({cmd:"go test ./..."}); const p = await tools.update_plan({plan:[]}); text(r.output); text(p)`,
+			want:   "go test ./... (+1 more tool call) -> 0 targets, 0 outside",
+		},
+		{
+			name:   "plain orchestration remains generic",
+			source: `text("done")`,
+			want:   "exec -> 0 targets, 0 outside",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SummarizeTool("exec", map[string]any{"_raw": tt.source}, nil, nil, false)
+			if got != tt.want {
+				t.Fatalf("summary = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInjectedUserMessageShape(t *testing.T) {
 	injected := []string{
 		"<system-reminder>context</system-reminder>",
@@ -349,6 +397,9 @@ func TestBuildEventIgnoresExecExamplesInStringsAndComments(t *testing.T) {
 	event := buildExecEvent(root, map[string]any{"_raw": source})
 	if event.Action != "exec" || len(event.Targets) != 0 {
 		t.Fatalf("event = %#v", event)
+	}
+	if event.Summary != "exec -> 0 targets, 0 outside" {
+		t.Fatalf("summary = %q", event.Summary)
 	}
 }
 

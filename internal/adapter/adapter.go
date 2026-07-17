@@ -1033,13 +1033,51 @@ func verifyCommand(command string) bool {
 	return false
 }
 
+const toolSummaryVerbLimit = 96
+
+// summarizeExecWrapper makes Codex orchestration events readable without
+// evaluating their free-form JavaScript. Static commands use the same parser
+// as action/target inference; dynamic calls expose only the nested tool name.
+func summarizeExecWrapper(input map[string]any) string {
+	commands := execCommands(input)
+	source := execSource(input)
+	nestedTools := execToolNames(source)
+	if len(commands) == 0 && len(nestedTools) == 0 {
+		return ""
+	}
+
+	primary := ""
+	if len(commands) > 0 {
+		primary = commands[0].command
+	} else {
+		primary = nestedTools[0]
+	}
+	additionalCalls := len(commands) - 1
+	if len(nestedTools) > 0 {
+		additionalCalls = len(nestedTools) - 1
+	}
+
+	suffix := ""
+	if additionalCalls == 1 {
+		suffix = " (+1 more tool call)"
+	} else if additionalCalls > 1 {
+		suffix = fmt.Sprintf(" (+%d more tool calls)", additionalCalls)
+	}
+	commandLimit := toolSummaryVerbLimit - len([]rune(suffix))
+	return textutil.TruncateRunes(primary, commandLimit, "...") + suffix
+}
+
 func SummarizeTool(tool string, input map[string]any, targets []model.Target, outside []model.OutsideTouch, isError bool) string {
 	verb := tool
 	if desc, ok := input["description"].(string); ok && desc != "" {
 		verb = desc
 	}
 	if command := firstString(input, "command", "cmd"); command != "" {
-		verb = textutil.TruncateRunes(command, 96, "...")
+		verb = textutil.TruncateRunes(command, toolSummaryVerbLimit, "...")
+	} else if tool == "exec" {
+		if summary := summarizeExecWrapper(input); summary != "" {
+			verb = summary
+		}
 	}
 	status := ""
 	if isError {

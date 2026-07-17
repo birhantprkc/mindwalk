@@ -331,6 +331,9 @@ func TestParseCodexCustomExec(t *testing.T) {
 	if event.Tool != "exec" || event.Action != "read" || len(event.Targets) != 1 || event.Targets[0].Path != "README.md" || event.Targets[0].Touch != "read" {
 		t.Fatalf("event = %#v", event)
 	}
+	if want := "sed -n '1,20p' README.md -> 1 targets, 0 outside"; event.Summary != want {
+		t.Fatalf("summary = %q, want %q", event.Summary, want)
+	}
 }
 
 func TestCallIDFallsBackToResponseID(t *testing.T) {
