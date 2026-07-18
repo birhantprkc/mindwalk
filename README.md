@@ -44,6 +44,7 @@ serves the UI on a random local port, and opens a browser:
 ```text
 mindwalk serve [--port N] [--no-open] [--claude-dir DIR] [--codex-dir DIR]
 mindwalk open [--no-open] <session.jsonl>   open one specific session
+mindwalk map [--no-open] <repo>             open a repository map, no session needed
 mindwalk build <repo> [-o out]              write the repository citymap JSON
 mindwalk trace <session> [-o out]           write the normalized trace JSON
 mindwalk analyze <session> [--judge claude|codex] [--model name]
@@ -55,25 +56,36 @@ mindwalk analyze <session> [--judge claude|codex] [--model name]
 - **Tree / Terrain views** — the repo as a radial tree or a treemap plain;
   glow ∝ how deeply and how often a file was touched.
 - **Touch states** — each file keeps its deepest touch: seen (moss green),
-  read (moon white), edited (warm amber), unvisited (dark). The HUD folds
-  friction signals — error rate, churned files, edits after the last verify —
-  into a review strip.
+  read (moonlight blue), edited (warm amber), unvisited (dark). Files the
+  session touched that are no longer in the repo linger as wireframe ghosts.
+  The HUD folds friction signals — error rate, churned files, edits after the
+  last verify — into a review strip.
 - **Playback deck** — scrub or play the session over a bucketed histogram of
   the run. Bars sit on a cool/warm spectrum: observation stays cool (search,
   read, exec), mutation glows warm (edit, verify), so editing phases jump out
-  at a glance.
+  at a glance. Restart, speed, and video export fold into the deck's `⋯` menu;
+  export records the playback to a `.webm` entirely client-side.
 - **Timeline marks** — `◇` context compactions, `○` subagent launches,
   `›` user turns; every mark is a click-to-jump target.
+- **Agent lenses** — when a session launched subagents, the HUD carries a
+  subagent count and an agents panel: pick a lens to replay any subagent's
+  trace on the same map, then step back out to the main trace.
 - **Inspector** — click a file to pin its visit history; click a visit row to
   jump the playhead to that moment.
 - **Evaluate** — ask a local agent CLI to judge the session's trajectory;
   session rows carry the evaluation state as a quiet badge. See
   [Session evaluation](#session-evaluation).
+- **Repo map** — `mindwalk map <repo>` (or the folder icon in the session
+  rail) renders any repository's citymap with no session attached; height
+  encodes lines of code instead of attention.
 
 ![the same session on the terrain view](assets/screenshot-terrain.png)
 
+![agent lenses over the same session](assets/screenshot-agents.png)
+
 Keyboard: `Space` play/pause · `←`/`→` step (`⇧` ×10) · `Home`/`End` ends ·
-`S` speed · `E` next edit · `X` next error · `M` next mark · `⌘B` session rail.
+`S` speed · `V` view · `E` next edit · `X` next error · `M` next mark ·
+`⌘B` session rail.
 
 ## Session evaluation
 
@@ -99,6 +111,8 @@ Three artifacts, kept deliberately separate:
 
 1. a **trace** — the session log normalized into an ordered stream of
    file-touch events (`internal/adapter`, one adapter per agent format);
+   adapters also correlate subagent sessions into an agent graph, so each
+   subagent's trace can be replayed on its own;
 2. a **citymap** — a deterministic layout of the repository
    (`internal/citymap`); the same tree always produces the same map, so
    replays are comparable across sessions;
