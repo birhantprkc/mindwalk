@@ -1,5 +1,4 @@
 .DS_Store
-assets/mindwalk-demo.mp4
 bin/
 dist/
 coverage.out
